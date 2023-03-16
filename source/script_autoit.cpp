@@ -965,9 +965,9 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 		return FR_E_WIN32;
 	}
 
-	// Open our output file (overwrite if necessary)
-	auto hOut = CreateFile(aFilespec, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
-	if (hOut == INVALID_HANDLE_VALUE)
+	// Open our output file
+	FILE *fptr = _tfopen(aFilespec, _T("wb"));	// Open in binary write/destroy mode
+	if (!fptr)
 	{
 		InternetCloseHandle(hFile);
 		InternetCloseHandle(hInet);
@@ -996,9 +996,7 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 			if (!buffers.dwBufferLength) // Transfer is complete.
 				break;
 			LONG_OPERATION_UPDATE  // Done in between the net-read and the file-write to improve avg. responsiveness.
-			result = WriteFile(hOut, bufData, buffers.dwBufferLength, &bytes_written, nullptr);
-			if (!result)
-				break;
+			fwrite(bufData, buffers.dwBufferLength, 1, fptr);
 			buffers.dwBufferLength = sizeof(bufData);  // Reset buffer capacity for next iteration.
 		}
 	}
@@ -1010,9 +1008,7 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 			if (!number_of_bytes_read)
 				break;
 			LONG_OPERATION_UPDATE
-			result = WriteFile(hOut, bufData, number_of_bytes_read, &bytes_written, nullptr);
-			if (!result)
-				break;
+			fwrite(bufData, buffers.dwBufferLength, 1, fptr);
 		}
 	}
 	DWORD last_error = GetLastError();
@@ -1020,7 +1016,7 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 	InternetCloseHandle(hFile);
 	InternetCloseHandle(hInet);
 	// Close output file:
-	CloseHandle(hOut);
+	fclose(fptr);
 
 	if (!result) // An error occurred during the transfer.
 	{
