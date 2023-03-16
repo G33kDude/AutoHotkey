@@ -1,0 +1,45 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Build
+
+# Controls when the action will run. Triggers the workflow on push or pull request
+# events but only for the master branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to checkout'
+        type: string
+        required: true
+
+run-name: Build ${{ inputs.branch }}
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: windows-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+    # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+    - uses: actions/checkout@v3
+      with:
+        ref: "${{ github.event.inputs.branch }}"
+    - uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Info
+      run: |
+        $info = "Branch: ${{ github.event.inputs.branch }}, Commit: " + (git log -1 '--format=format:%H')
+        echo $info >> $GITHUB_STEP_SUMMARY
+        echo "info=" + $info >> $GITHUB_OUTPUT
+    - name: Build
+      run: msbuild .\AutoHotkeyx.sln /t:Rebuild /p:Configuration=Debug /p:Platform="x64"
+
+    - name: Save output
+      uses: actions/upload-artifact@v3
+      with:
+        name: "AutoHotkey.exe"
+        path: bin\x64w_debug\AutoHotkey.exe
