@@ -42,4 +42,4 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: "AutoHotkey.exe"
-        path: bin\x64w_debug\AutoHotkey.exe
+        path: bin_debug\AutoHotkey64.exe
