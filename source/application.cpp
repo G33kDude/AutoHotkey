@@ -459,8 +459,11 @@ bool MsgSleep(int aSleepDuration, MessageMode aMode)
 		// now only used for keyboard handling.  This reduces code complexity a little and
 		// eliminates some uncertainty about message routing.  All of the cases for WM_USER
 		// range messages below already checked msg.hwnd to ensure it is one of our messages.
+		// UPDATE: Mouse messages must also be passed through IsDialogMessage() so that clicking
+		// a Button will temporarily apply the BS_DEFPUSHBUTTON style.
 		if (g_firstGui // Checked first to help performance, since all messages must come through this bottleneck.
-			&& msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST
+			&& (msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST
+				|| msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST)
 			&& (pgui = GuiType::FindGuiParent(msg.hwnd))) // Ordered for short-circuit performance.
 		{
 			focused_control = msg.hwnd; // Alias for maintainability.  Seems more appropriate (and efficient) to use this vs. GetFocus().
@@ -596,7 +599,7 @@ bool MsgSleep(int aSleepDuration, MessageMode aMode)
 				if (msg_was_handled) // This message was handled by IsDialogMessage() above.
 					continue; // Continue with the main message loop.
 			}
-		} // if (keyboard message posted to GUI)
+		} // if (keyboard or mouse message posted to GUI)
 
 		// v1.0.44: There's no reason to call TRANSLATE_AHK_MSG here because all WM_COMMNOTIFY messages
 		// are sent to g_hWnd. Thus, our call to DispatchMessage() later below will route such messages to
@@ -1167,10 +1170,8 @@ bool MsgSleep(int aSleepDuration, MessageMode aMode)
 				if (gui_action == GUI_EVENT_CONTEXTMENU && pcontrol)
 				{
 					// Call the control's context menu handler, if any, omitting the "Gui" parameter
-					// for consistency with other Ctrl events (and perhaps convenience).  But don't
-					// omit the first parameter if the Gui parameter was already omitted.
-					int arg_to_omit = pgui->mEventSink != pgui ? 1 : 0;
-					result = pcontrol->events.Call(gui_event_args + arg_to_omit, gui_event_arg_count - arg_to_omit, gui_event_code, gui_event_kind, pgui);
+					// for consistency with other Ctrl events (and perhaps convenience).
+					result = pcontrol->events.Call(gui_event_args + 1, gui_event_arg_count - 1, gui_event_code, gui_event_kind, pgui);
 					if (result == EARLY_RETURN // Suppress the GUI's handler for this event, if any.
 						|| !pgui->mHwnd) // Gui was destroyed.
 					{
@@ -1880,6 +1881,7 @@ void InitNewThread(int aPriority, bool aSkipUninterruptible, bool aIncrementThre
 	if (g_script.mUninterruptibleTime && g_script.mUninterruptedLineCountMax // Both components must be non-zero to start off uninterruptible.
 		|| g.ThreadIsCritical) // v1.0.38.04.
 	{
+		g.PeekFrequency = UNINTERRUPTIBLE_PEEK_FREQUENCY; // This ensures the thread will always have a chance to call Critical() before MsgSleep() is called.
 		g.AllowThreadToBeInterrupted = false;
 		if (!g.ThreadIsCritical)
 		{
@@ -1993,10 +1995,14 @@ BOOL IsInterruptible()
 		&& (DWORD)(GetTickCount()- g->ThreadStartTime) >= (DWORD)g->UninterruptibleDuration // See big comment section above.
 		&& g->UninterruptedLineCount // In case of "Critical" on the first line.  See v2.0 comment above.
 		)
+	{
 		// Once the thread becomes interruptible by any means, g->ThreadStartTime/UninterruptibleDuration
 		// can never matter anymore because only Critical (never "Thread Interrupt") can turn off the
 		// interruptibility again, and it resets g->UninterruptibleDuration.
 		g->AllowThreadToBeInterrupted = true; // Avoids issues with 49.7 day limit of 32-bit TickCount, and also helps performance future callers of this function (they can skip most of the checking above).
+		if (!g->ThreadIsCritical)
+			g->PeekFrequency = DEFAULT_PEEK_FREQUENCY;
+	}
 	//else g->AllowThreadToBeInterrupted is already up-to-date.
 	return (BOOL)g->AllowThreadToBeInterrupted;
 }
@@ -2060,4 +2066,51 @@ VOID CALLBACK InputTimeout(HWND hWnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
 VOID CALLBACK RefreshInterruptibility(HWND hWnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime)
 {
 	IsInterruptible(); // Search on RefreshInterruptibility for comments.
+}
+
+
+
+void InitMenuPopup(HMENU aMenu)
+{
+	if (MenuIsModeless(aMenu))
+	{
+		// Modeless menus don't interfere with things in the same way as modal menus.
+		g_MenuIsVisible = false;
+	}
+}
+
+
+
+void UninitMenuPopup(HMENU aMenu)
+{
+	if (g_MenuIsTempModeless == aMenu)
+	{
+		g_MenuIsTempModeless = NULL;
+		// Restore the menu's previous style so that next time the menu is shown, we can identify it
+		// as one that we need to make temporarily modeless (i.e. not one the script has made modeless),
+		// and also in case the script calls TrackPopupMenuEx directly and expects it to wait.
+		MENUINFO mi;
+		mi.cbSize = sizeof(mi);
+		mi.fMask = MIM_STYLE;
+		if (GetMenuInfo(aMenu, &mi))
+		{
+			mi.dwStyle &= ~MNS_MODELESS;
+			SetMenuInfo(aMenu, &mi);
+		}
+		// Revert g_hWnd to non-topmost if appropriate.
+		if (g_MenuIsTempTopmost)
+			SetWindowPos(g_hWnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+	}
+}
+
+
+
+bool MenuIsModeless(HMENU aMenu)
+{
+	MENUINFO mi;
+	mi.cbSize = sizeof(mi);
+	mi.fMask = MIM_STYLE;
+	mi.dwStyle = 0;
+	GetMenuInfo(aMenu, &mi);
+	return (mi.dwStyle & MNS_MODELESS);
 }

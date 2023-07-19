@@ -319,7 +319,6 @@ static inline int DPIUnscale(int x)
 
 #define INPUTBOX_DEFAULT INT_MIN
 ResultType InputBoxParseOptions(LPCTSTR aOptions, InputBoxType &aInputBox);
-ResultType InputBox(Var *aOutputVar, LPTSTR aText, LPTSTR aTitle, LPTSTR aOptions, LPTSTR aDefault);
 INT_PTR CALLBACK InputBoxProc(HWND hWndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 VOID CALLBACK InputBoxTimeout(HWND hWnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
 VOID CALLBACK DerefTimeout(HWND hWnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
@@ -1310,9 +1309,8 @@ public:
 
 
 // This class encapsulates a pointer to an object which can be called by a timer,
-// hotkey, etc.  It provides common functionality that wouldn't be suitable for the
-// base IObject interface, but is needed for detection of "Suspend" or "Critical"
-// prior to calling the sub or function.
+// hotkey, etc.  It was originally added to support functions/objects in addition
+// to labels, but label support was removed.
 class IObjectPtr
 {
 protected:
@@ -1340,8 +1338,7 @@ public:
 class IObjectRef : public IObjectPtr
 {
 private:
-	IObjectRef(const IObjectRef &); // Disable default copy constructor.
-	IObjectRef & operator = (const IObjectRef &); // ...and copy assignment.
+	IObjectRef & operator = (const IObjectRef &) = delete; // Disable default copy assignment.
 
 public:
 	IObjectRef() : IObjectPtr() {}
@@ -2034,7 +2031,7 @@ public:
 	FResult Rename(StrArg aItemName, optl<StrArg> aNewName);
 	FResult SetColor(ExprTokenType *aColor, optl<BOOL> aApplyToSubmenus);
 	FResult SetIcon(StrArg aItemName, StrArg aIconFile, optl<int> aIconNumber, optl<int> aIconWidth);
-	FResult Show(optl<int> aX, optl<int> aY);
+	FResult Show(optl<int> aX, optl<int> aY, optl<BOOL> aWait);
 	FResult ToggleCheck(StrArg aItemName);
 	FResult ToggleEnable(StrArg aItemName);
 	FResult Uncheck(StrArg aItemName);
@@ -2062,7 +2059,7 @@ public:
 	void ApplyColor(bool aApplyToSubmenus);
 	ResultType AppendStandardItems();
 	ResultType EnableStandardOpenItem(bool aEnable);
-	ResultType Display(bool aForceToForeground = true, int aX = COORD_UNSPECIFIED, int aY = COORD_UNSPECIFIED);
+	ResultType Display(int aX = COORD_UNSPECIFIED, int aY = COORD_UNSPECIFIED, optl<BOOL> aWait = false);
 	FResult GetItem(LPCTSTR aNameOrPos, UserMenuItem *&aItem);
 	FResult ItemNotFoundError(LPCTSTR aItem);
 	UserMenuItem *FindItem(LPCTSTR aNameOrPos, UserMenuItem *&aPrevItem, bool &aByPos);
@@ -2610,15 +2607,11 @@ public:
 	static LPTSTR sEventNames[];
 	static LPTSTR ConvertEvent(GuiEventType evt);
 	static GuiEventType ConvertEvent(LPCTSTR evt);
-	// Currently this returns true for all events if we're using an event sink,
-	// because checking for the presence of a method in the event sink could be
-	// unreliable (but maybe placing some limitations would solve that?).
 	BOOL IsMonitoring(GuiEventType aEvent) { return mEvents.IsMonitoring(aEvent); }
 
 	ResultType GetEnumItem(UINT &aIndex, Var *, Var *, int);
 
 	static IObject* CreateDropArray(HDROP hDrop);
-	void SetMenu(ResultToken &aResultToken, ExprTokenType &aParam);
 	static void UpdateMenuBars(HMENU aMenu);
 	ResultType AddControl(GuiControls aControlType, LPCTSTR aOptions, LPCTSTR aText, GuiControlType*& apControl, Array *aObj = NULL);
 	void MethodGetPos(int *aX, int *aY, int *aWidth, int *aHeight, RECT &aRect, HWND aOrigin);
@@ -3097,8 +3090,6 @@ public:
 	ResultType PreparseVarRefs();
 	void CountNestedFuncRefs(UserFunc &aWithin, LPCTSTR aFuncName);
 
-	ResultType ThrowIfTrue(bool aError);
-	ResultType ThrowIntIfNonzero(int aErrorValue);
 	ResultType ThrowRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo, Line *aLine, ResultType aErrorType, Object *aPrototype = nullptr);
 	ResultType ThrowRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo = _T(""));
 	ResultType Win32Error(DWORD aError = GetLastError(), ResultType aErrorType = FAIL_OR_OK);
@@ -3251,10 +3242,10 @@ BIF_DECL(BIF_Cos);
 BIF_DECL(BIF_Tan);
 BIF_DECL(BIF_ASinACos);
 BIF_DECL(BIF_ATan);
+BIF_DECL(BIF_ATan2);
 BIF_DECL(BIF_Exp);
 BIF_DECL(BIF_SqrtLogLn);
 BIF_DECL(BIF_MinMax);
-BIF_DECL(BIF_Hotkey);
 
 BIF_DECL(BIF_Trim); // L31: Also handles LTrim and RTrim.
 BIF_DECL(BIF_VerCompare);
@@ -3313,7 +3304,6 @@ SymbolType TokenIsPureNumeric(ExprTokenType &aToken);
 SymbolType TokenIsPureNumeric(ExprTokenType &aToken, SymbolType &aIsImpureNumeric);
 BOOL TokenIsEmptyString(ExprTokenType &aToken);
 SymbolType TypeOfToken(ExprTokenType &aToken);
-SymbolType TypeOfToken(ExprTokenType &aToken, SymbolType &aIsNum);
 __int64 TokenToInt64(ExprTokenType &aToken);
 double TokenToDouble(ExprTokenType &aToken, BOOL aCheckForHex = TRUE);
 LPTSTR TokenToString(ExprTokenType &aToken, LPTSTR aBuf = NULL, size_t *aLength = NULL);

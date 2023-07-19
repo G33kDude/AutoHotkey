@@ -533,7 +533,7 @@ ResultType Object::Invoke(IObject_Invoke_PARAMS_DECL)
 	bool handle_params_recursively = calling;
 	ResultToken token_for_recursion;
 	IObject *etter = nullptr, *method = nullptr;
-	Variant *field = nullptr;
+	FieldType *field = nullptr;
 	index_t insert_pos, other_pos;
 	Object *that;
 
@@ -999,7 +999,7 @@ bool Object::CanSetBase(Object *aBase)
 	auto new_native_base = (!aBase || aBase->IsNativeClassPrototype())
 		? aBase : aBase->GetNativeBase();
 	return new_native_base == GetNativeBase() // Cannot change native type.
-		&& !aBase->IsDerivedFrom(this); // Cannot create loops.
+		&& !aBase->IsDerivedFrom(this) && aBase != this; // Cannot create loops.
 }
 
 
@@ -1345,13 +1345,13 @@ void Map::Capacity(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType
 
 void Object::OwnProps(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount)
 {
-	_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 1)
+	_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 0)
 		, static_cast<IndexEnumerator::Callback>(&Object::GetEnumProp)));
 }
 
 void Map::__Enum(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount)
 {
-	_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 1)
+	_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 0)
 		, static_cast<IndexEnumerator::Callback>(&Map::GetEnumItem)));
 }
 
@@ -2088,7 +2088,7 @@ void Array::Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType
 		_o_throw_oom;
 
 	case M___Enum:
-		_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 1)
+		_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 0)
 			, static_cast<IndexEnumerator::Callback>(&Array::GetEnumItem)));
 	}
 }
@@ -2164,7 +2164,7 @@ bool EnumBase::Call(ResultToken &aResultToken, ExprTokenType *aParam[], int aPar
 
 ResultType IndexEnumerator::Next(Var *var0, Var *var1)
 {
-	return (mObject->*mGetItem)(++mIndex, var0, var1, mParamCount);
+	return (mObject->*mGetItem)(++mIndex, var0, var1, mParamCount ? mParamCount : var1 ? 2 : 1);
 }
 
 
@@ -2251,7 +2251,7 @@ ResultType RegExMatchObject::GetEnumItem(UINT &aIndex, Var *aKey, Var *aVal, int
 		return CONDITION_FALSE;
 	// In single-var mode, return the subpattern values.
 	// Otherwise, return the subpattern names first and values second.
-	if (aVarCount < 2)
+	if (aVarCount == 1)
 	{
 		aVal = aKey;
 		aKey = nullptr;
@@ -2699,19 +2699,26 @@ bool FreeVars::FullyReleased(ULONG aRefPendingRelease)
 	// This function is part of a workaround for circular references that occur because all closures
 	// have a reference to this FreeVars, while any closure referenced by itself or another closure
 	// has a reference in mVar[].
+	// aRefPendingRelease is 0 when this is being released the normal way (due to either the outer
+	// function returning or a non-grouped Closure being deleted) and 1 when the script releases its
+	// last direct reference to a grouped Closure.
 	if (mRefCount)
-		return mRefCount < 0;
+		return mRefCount < 0; // Negative values mean a previous call (still on the stack) is deleting this.
 	int circular_closures = 0;
+	ULONG extra_references = 0;
 	for (int i = 0; i < mVarCount; ++i)
 		if (mVar[i].Type() == VAR_CONSTANT)
 		{
 			ASSERT(mVar[i].HasObject() && dynamic_cast<ObjectBase*>(mVar[i].Object())); // Any object in VAR_CONSTANT must derive from ObjectBase.
 			auto obj = (ObjectBase *)mVar[i].Object();
-			if (obj->RefCount() && aRefPendingRelease == 0)
-				return false;
-			--aRefPendingRelease;
+			extra_references += obj->RefCount();
 			++circular_closures;
 		}
+	// aRefPendingRelease == 0 && extra_references > 0: keep alive.
+	// aRefPendingRelease == 1 && extra_references > 1: keep alive.
+	// aRefPendingRelease == 1 && extra_references == 1: delete, because that one Closure is being deleted.
+	if (extra_references > aRefPendingRelease)
+		return false;
 	--mRefCount; // Now that delete is certain, make this non-zero to prevent reentry.
 	if (circular_closures)
 	{

@@ -177,7 +177,7 @@ ResultType GuiType::GetEnumItem(UINT &aIndex, Var *aOutputVar1, Var *aOutputVar2
 	if (aIndex >= mControlCount) // Use >= vs. == in case the Gui was destroyed.
 		return CONDITION_FALSE;
 	GuiControlType* ctrl = mControl[aIndex];
-	if (aVarCount < 2) // `for x in myGui` or `[myGui*]`
+	if (aVarCount == 1) // `for x in myGui` or `[myGui*]`
 	{
 		aOutputVar2 = aOutputVar1; // Return the more useful value in single-var mode: the control object.
 		aOutputVar1 = nullptr;
@@ -193,7 +193,7 @@ ResultType GuiType::GetEnumItem(UINT &aIndex, Var *aOutputVar1, Var *aOutputVar2
 FResult GuiType::__Enum(optl<int> aVarCount, IObject *&aRetVal)
 {
 	GUI_MUST_HAVE_HWND;
-	aRetVal = new IndexEnumerator(this, aVarCount.value_or(1)
+	aRetVal = new IndexEnumerator(this, aVarCount.value_or(0)
 		, static_cast<IndexEnumerator::Callback>(&GuiType::GetEnumItem));
 	return OK;
 }
@@ -1176,11 +1176,15 @@ FResult GuiType::ControlMove(GuiControlType &aControl, int xpos, int ypos, int w
 	RECT rect;
 	GetWindowRect(aControl.hwnd, &rect); // Failure seems too rare to check for.
 	POINT dest_pt = {rect.left, rect.top};
-	ScreenToClient(GetParent(aControl.hwnd), &dest_pt); // Set default x/y target position, to be possibly overridden below.
+	ScreenToClient(mHwnd, &dest_pt); // Set default x/y target position, to be possibly overridden below.
 	if (xpos != COORD_UNSPECIFIED)
 		dest_pt.x = Scale(xpos);
 	if (ypos != COORD_UNSPECIFIED)
 		dest_pt.y = Scale(ypos);
+	
+	// Map to the GUI window's client area (inverse of GetPos) in case the
+	// GUI window isn't the control's parent, such as if it is on a Tab3.
+	MapWindowPoints(mHwnd, GetParent(aControl.hwnd), &dest_pt, 1);
 
 	if (!MoveWindow(aControl.hwnd, dest_pt.x, dest_pt.y
 		, width == COORD_UNSPECIFIED ? rect.right - rect.left : Scale(width)
@@ -6300,7 +6304,13 @@ ResultType GuiType::ControlParseOptions(LPCTSTR aOptions, GuiControlOptionsType 
 				break;
 
 			case 'V': // Name (originally: Variable)
-				ControlSetName(aControl, option_value);
+				switch (ControlSetName(aControl, option_value))
+				{
+				case FR_FAIL:
+					return FAIL;
+				case FR_E_OUTOFMEM:
+					return MemoryError();
+				}
 				break;
 
 			case 'C':  // Color
@@ -8073,7 +8083,7 @@ int GuiType::FindOrCreateFont(LPCTSTR aOptions, LPCTSTR aFontName, FontType *aFo
 
 	TCHAR option[MAX_NUMBER_SIZE + 1];
 	LPCTSTR next_option, option_end;
-	for (next_option = aOptions; *next_option; next_option = omit_leading_whitespace(option_end))
+	for (next_option = aOptions; *(next_option = omit_leading_whitespace(next_option)); next_option = option_end)
 	{
 		// Find the end of this option item:
 		for (option_end = next_option; *option_end && !IS_SPACE_OR_TAB(*option_end); ++option_end);
@@ -8218,16 +8228,16 @@ LRESULT CALLBACK GuiWindowProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lPara
 	// CalledByIsDialogMessageOrDispatch for any threads beneath it.  Although this may technically be
 	// unnecessary, it adds maintainability.
 	LRESULT msg_reply;
-	if (g_MsgMonitor.Count() // Count is checked here to avoid function-call overhead.
-		&& (!g->CalledByIsDialogMessageOrDispatch || g->CalledByIsDialogMessageOrDispatchMsg != iMsg) // v1.0.44.11: If called by IsDialog or Dispatch but they changed the message number, check if the script is monitoring that new number.
-		&& MsgMonitor(hWnd, iMsg, wParam, lParam, NULL, msg_reply))
+	if (g->CalledByIsDialogMessageOrDispatch && g->CalledByIsDialogMessageOrDispatchMsg == iMsg)
+		g->CalledByIsDialogMessageOrDispatch = false; // Suppress this one message, not any other messages that could be sent due to recursion.
+	else if (g_MsgMonitor.Count() && MsgMonitor(hWnd, iMsg, wParam, lParam, NULL, msg_reply)) // Count is checked here to avoid function-call overhead.
 		return msg_reply; // MsgMonitor has returned "true", indicating that this message should be omitted from further processing.
-	g->CalledByIsDialogMessageOrDispatch = false;
+	//g->CalledByIsDialogMessageOrDispatch = false; // Now done conditionally above.
 	// Fixed for v1.0.40.01: The above line was added to resolve a case where our caller did make the value
 	// true but the message it sent us results in a recursive call to us (such as when the user resizes a
 	// window by dragging its borders: that apparently starts a loop in DefDlgProc that calls this
 	// function recursively).  This fixes OnMessage(0x24, "WM_GETMINMAXINFO") and probably others.
-	// Known limitation: If the above launched a thread but the thread didn't cause it turn return,
+	// Known limitation: If the above launched a thread but the thread didn't cause it to return,
 	// and iMsg is something like AHK_GUI_ACTION that will be reposted via PostMessage(), the monitor
 	// will be launched again when MsgSleep is called in conjunction with the repost. Given the rarity
 	// and the minimal consequences of this, no extra code (such as passing a new parameter to MsgSleep)
@@ -9136,26 +9146,38 @@ LRESULT CALLBACK GuiWindowProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lPara
 		break;
 
 	// For WM_ENTERMENULOOP/WM_EXITMENULOOP, there is similar code in MainWindowProc(), so maintain them together.
-	// WM_ENTERMENULOOP: One of the MENU BAR menus has been displayed, and then we know the user is still in
-	// the menu bar, even moving to different menus and/or menu items, until WM_EXITMENULOOP is received.
-	// Note: It seems that when window's menu bar is being displayed/navigated by the user, our thread
-	// is tied up in a message loop other than our own.  In other words, it's very similar to the
-	// TrackPopupMenuEx() call used to handle the tray menu, which is why g_MenuIsVisible can be used
-	// for both types of menus to indicate to MainWindowProc() that timed subroutines should not be
-	// checked or allowed to launch during such times.  Also, "break" is used rather than "return 0"
-	// to let DefWindowProc()/DefaultDlgProc() take whatever action it needs to do for these.
-	// UPDATE: The value of g_MenuIsVisible is checked before changing it because it might already be
-	// set to MENU_TYPE_POPUP (apparently, TrackPopupMenuEx sometimes/always generates WM_ENTERMENULOOP).
-	// BAR vs. POPUP currently doesn't matter (as long as its non-zero); thus, the above is done for
-	// maintainability.
+	// g_MenuIsVisible is tracked for the purpose of preventing thread interruptions while the program
+	// is in a modal menu loop, since the menu would become unresponsive until the interruption returns.
+	// WM_ENTERMENULOOP is received both when entering a modal menu loop (due to a menu bar or popup menu)
+	// and when a modeless menu is being displayed (in which case there's actually no menu loop).
+	// WM_INITMENUPOPUP is handled to verify which situation this is, so that new threads can launch
+	// while a modeless menu is being displayed.  We use this combination of messages rather than just
+	// the INIT messages because some scripts already suppress WM_ENTERMENULOOP to allow new threads.
+	// "break" is used rather than "return 0" to let DefWindowProc()/DefDlgProc() take whatever action
+	// it needs to do for these.
 	case WM_ENTERMENULOOP:
-		if (!g_MenuIsVisible) // See comments above.
-			g_MenuIsVisible = MENU_TYPE_BAR;
+		g_MenuIsVisible = true;
 		break;
 	case WM_EXITMENULOOP:
-		g_MenuIsVisible = MENU_TYPE_NONE; // See comments above.
+		g_MenuIsVisible = false; // See comments above.
 		break;
-
+	case WM_INITMENUPOPUP:
+		InitMenuPopup((HMENU)wParam);
+		break;
+	case WM_UNINITMENUPOPUP:
+		// This currently isn't needed in GuiWindowProc() because notifications for temp-modeless
+		// menus are always sent to g_hWnd, but it is kept here for symmetry/maintainability:
+		UninitMenuPopup((HMENU)wParam);
+		break;
+	case WM_NCACTIVATE:
+		if (!wParam && g_MenuIsTempModeless)
+		{
+			// The documentation is quite ambiguous, but it appears the return value of WM_NCACTIVATE
+			// affects whether the actual change of foreground window goes ahead, whereas the appearance
+			// of the nonclient area is controlled by whether or not DefDlgProc() is called.
+			return TRUE; // Allow change of foreground window, but appear to remain active.
+		}
+		break;
 	} // switch()
 	
 	// This will handle anything not already fully handled and returned from above:
