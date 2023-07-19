@@ -3,10 +3,8 @@
   <PropertyGroup>
     <ProjectGuid>{76EFDEE3-81CF-4ADA-94DC-EA5509FF6FFC}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-  </PropertyGroup>
-  <PropertyGroup>
-    <TargetName>AutoHotkey</TargetName>
     <ConfigurationType>Application</ConfigurationType>
+    <ConfigurationType Condition="$(Configuration.Contains('.dll'))">DynamicLibrary</ConfigurationType>
   </PropertyGroup>
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -25,6 +23,14 @@
       <Configuration>Debug(mbcs)</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug.dll|Win32">
+      <Configuration>Debug.dll</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug.dll|x64">
+      <Configuration>Debug.dll</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
     <ProjectConfiguration Include="Release|Win32">
       <Configuration>Release</Configuration>
       <Platform>Win32</Platform>
@@ -41,12 +47,12 @@
       <Configuration>Release(mbcs)</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="Release(minimal)|Win32">
-      <Configuration>Release(minimal)</Configuration>
+    <ProjectConfiguration Include="Release.dll|Win32">
+      <Configuration>Release.dll</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="Release(minimal)|x64">
-      <Configuration>Release(minimal)</Configuration>
+    <ProjectConfiguration Include="Release.dll|x64">
+      <Configuration>Release.dll</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
     <ProjectConfiguration Include="Self-contained|Win32">
@@ -73,14 +79,6 @@
       <Configuration>Self-contained(mbcs)</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="Self-contained(minimal)|Win32">
-      <Configuration>Self-contained(minimal)</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Self-contained(minimal)|x64">
-      <Configuration>Self-contained(minimal)</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
   </ItemGroup>
   <!-- import common config -->
   <Import Project="Config.vcxproj" />
@@ -93,9 +91,10 @@
       <SubSystem>Windows</SubSystem>
       <AdditionalDependencies>wsock32.lib;winmm.lib;version.lib;comctl32.lib;psapi.lib;wininet.lib;shlwapi.lib;uxtheme.lib;dwmapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <StackReserveSize>4194304</StackReserveSize>
-      <TerminalServerAware>false</TerminalServerAware>
+      <TerminalServerAware Condition="!$(ConfigDll)">false</TerminalServerAware>
       <DataExecutionPrevention>false</DataExecutionPrevention>
       <RandomizedBaseAddress>false</RandomizedBaseAddress>
+      <ProgramDatabaseFile Condition="$(ConfigDll)">$(OutDir)\$(TargetName)_dll.pdb</ProgramDatabaseFile>
     </Link>
   </ItemDefinitionGroup>
   <!-- platform: win32 -->
@@ -119,12 +118,16 @@
   <!-- paths and basic settings -->
   <PropertyGroup>
     <IntDir>$(ProjectDir)temp\$(Platform)\$(Configuration)\</IntDir>
-    <BinDir>$(ProjectDir)bin\$(Platform)</BinDir>
-    <BinDir Condition="'$(CharacterSet)'=='Unicode'">$(BinDir)w</BinDir>
-    <BinDir Condition="'$(CharacterSet)'=='MultiByte'">$(BinDir)a</BinDir>
+    <BinDir>bin</BinDir>
     <OutDir>$(BinDir)\</OutDir>
     <OutDir Condition="$(ConfigDebug)">$(BinDir)_debug\</OutDir>
     <OutDir Condition="$(ConfigMinSize)">$(BinDir)_minimal\</OutDir>
+    <BinSuffixChar Condition="'$(CharacterSet)'=='MultiByte'">A</BinSuffixChar>
+    <BinTypeWord>$(CharacterSet)</BinTypeWord>
+    <BinTypeWord Condition="'$(CharacterSet)'=='MultiByte'">ANSI</BinTypeWord>
+    <BinSuffixBits Condition="'$(Platform)'=='Win32'">32</BinSuffixBits>
+    <BinSuffixBits Condition="'$(Platform)'=='x64'">64</BinSuffixBits>
+    <TargetName>AutoHotkey$(BinSuffixChar)$(BinSuffixBits)</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -138,9 +141,18 @@
       <AdditionalManifestFiles>source\resources\AutoHotkey.exe.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
     </Manifest>
   </ItemDefinitionGroup>
+  <!-- AutoHotkey.dll -->
+  <ItemDefinitionGroup Condition="$(ConfigDll)">
+    <ClCompile>
+      <PreprocessorDefinitions>CONFIG_DLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>CONFIG_DLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
   <!-- self-contained: required settings -->
   <PropertyGroup Condition="$(ConfigSC)">
-    <TargetName>AutoHotkeySC</TargetName>
+    <TargetName>$(BinTypeWord) $(BinSuffixBits)-bit</TargetName>
     <TargetExt>.bin</TargetExt>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="$(ConfigSC)">
@@ -177,34 +189,29 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release(mbcs)|Win32'" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release(mbcs)|x64'" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release(minimal)|Win32'" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release(minimal)|x64'" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained|Win32'" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained|x64'" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(debug)|Win32'" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(debug)|x64'" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(mbcs)|Win32'" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(mbcs)|x64'" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(minimal)|Win32'" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(minimal)|x64'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release(mbcs)|Win32'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release(mbcs)|x64'" />
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release(minimal)|Win32'" />
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release(minimal)|x64'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained|Win32'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained|x64'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(debug)|Win32'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(debug)|x64'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(mbcs)|Win32'" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(mbcs)|x64'" />
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(minimal)|Win32'" />
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Self-contained(minimal)|x64'" />
   <!-- FILES -->
   <ItemGroup>
+    <ClCompile Include="source\ahklib.cpp">
+      <ExcludedFromBuild Condition="!$(ConfigDll)">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="source\ahkversion.cpp" />
     <ClCompile Include="source\application.cpp" />
     <ClCompile Include="source\AutoHotkey.cpp" />
@@ -287,6 +294,7 @@
     <ClInclude Include="source\debug.h" />
     <ClInclude Include="source\Debugger.h" />
     <ClInclude Include="source\defines.h" />
+    <ClInclude Include="source\DispObject.h" />
     <ClInclude Include="source\globaldata.h" />
     <ClInclude Include="source\hook.h" />
     <ClInclude Include="source\hotkey.h" />
@@ -367,6 +375,13 @@
   <ItemGroup>
     <Natvis Include="debug.natvis" />
   </ItemGroup>
+  <ItemGroup>
+    <Midl Include="source\ahklib.idl">
+      <ExcludedFromBuild Condition="!$(ConfigDll)">true</ExcludedFromBuild>
+      <OutputDirectory>$(ProjectDir)source\autogenerated</OutputDirectory>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+    </Midl>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <!-- add version info from git -->
   <ItemGroup>
@@ -391,11 +406,15 @@
     </Exec>
     <PropertyGroup Condition="'$(GitDescription)'!='' and '$(GitDescription.Substring(0,1))'=='v'">
       <RawAhkVersion>$([System.Text.RegularExpressions.Regex]::Replace($(GitDescription.Substring(1)), "-(?=\d+-)|-g|-dirty$", "+"))</RawAhkVersion>
+      <AhkVersionN4>$([System.Text.RegularExpressions.Regex]::Replace($(GitDescription), ".*-(\d+)-g.*", "$1"))</AhkVersionN4>
+      <AhkVersionN4 Condition="'$(AhkVersionN4)'=='$(GitDescription)'">0</AhkVersionN4>
+      <AhkVersionN>$([System.Text.RegularExpressions.Regex]::Replace($(RawAhkVersion), "\.(\d+)([^\.\d].*)?", ",$1")),$(AhkVersionN4)</AhkVersionN>
     </PropertyGroup>
     <Message Text="RAW_AHK_VERSION sourced from git: '$(RawAhkVersion)'" Importance="high" />
+    <Message Text="AHK_VERSION_N sourced from git: '$(AhkVersionN)'" Importance="high" />
     <ItemGroup Condition="'$(RawAhkVersion)'!=''">
       <ResourceCompile>
-        <PreprocessorDefinitions>RAW_AHK_VERSION=\"$(RawAhkVersion)\";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+        <PreprocessorDefinitions>RAW_AHK_VERSION=\"$(RawAhkVersion)\";AHK_VERSION_N=$(AhkVersionN);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       </ResourceCompile>
       <ClCompile>
         <PreprocessorDefinitions>RAW_AHK_VERSION="$(RawAhkVersion)";%(PreprocessorDefinitions)</PreprocessorDefinitions>

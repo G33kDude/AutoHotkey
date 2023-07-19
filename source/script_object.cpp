@@ -18,7 +18,7 @@
 
 ResultType CallMethod(IObject *aInvokee, IObject *aThis, LPTSTR aMethodName
 	, ExprTokenType *aParamValue, int aParamCount, __int64 *aRetVal // For event handlers.
-	, int aExtraFlags) // For Object.__Delete().
+	, int aExtraFlags, bool aReturnBoolean)
 {
 	ResultToken result_token;
 	TCHAR result_buf[MAX_NUMBER_SIZE];
@@ -39,8 +39,11 @@ ResultType CallMethod(IObject *aInvokee, IObject *aThis, LPTSTR aMethodName
 
 	if (result != EARLY_EXIT && result != FAIL)
 	{
-		// Indicate to caller whether an integer value was returned (for MsgMonitor()).
-		result = TokenIsEmptyString(result_token) ? OK : EARLY_RETURN;
+		if (aReturnBoolean)
+			result = TokenToBOOL(result_token) ? CONDITION_TRUE : CONDITION_FALSE;
+		else
+			// Indicate to caller whether an integer value was returned (for MsgMonitor()).
+			result = TokenIsEmptyString(result_token) ? OK : EARLY_RETURN;
 	}
 	
 	if (aRetVal) // Always set this as some callers don't initialize it:
@@ -385,7 +388,7 @@ Array *Array::FromEnumerable(ExprTokenType &aEnumerable)
 
 
 //
-// Array::ToStrings - Used by BIF_StrSplit.
+// Array::ToStrings - Used by StrSplit.
 //
 
 ResultType Array::ToStrings(LPTSTR *aStrings, int &aStringCount, int aStringsMax)
@@ -530,7 +533,7 @@ ResultType Object::Invoke(IObject_Invoke_PARAMS_DECL)
 	bool handle_params_recursively = calling;
 	ResultToken token_for_recursion;
 	IObject *etter = nullptr, *method = nullptr;
-	Variant *field = nullptr;
+	FieldType *field = nullptr;
 	index_t insert_pos, other_pos;
 	Object *that;
 
@@ -593,7 +596,7 @@ ResultType Object::Invoke(IObject_Invoke_PARAMS_DECL)
 		continue;
 	} // for (that = each base)
 
-	if (!hasprop && aName)
+	if (!hasprop && !IS_INVOKE_META)
 	{
 		// Invoke a meta-function in place of this non-existent property.
 		auto result = CallMetaVarg(aFlags, aName, aResultToken, aThisToken, actual_param, actual_param_count);
@@ -721,9 +724,21 @@ ResultType Object::Invoke(IObject_Invoke_PARAMS_DECL)
 			return hasprop ? aResultToken.Error(ERR_PROPERTY_READONLY, name) : INVOKE_NOT_HANDLED;
 		}
 		
-		if (((field && this == that) // A field already exists in this object.
-				|| (field = Insert(name, insert_pos))) // A new field is inserted.
-			&& field->Assign(**actual_param))
+		if (!field || this != that) // No such property in this object yet.
+		{
+			if (actual_param[0]->symbol == SYM_MISSING)
+				return OK; // No action needed for x.y := unset.
+			if (  !(field = Insert(name, insert_pos))  )
+				return aResultToken.MemoryError();
+		}
+		else if (actual_param[0]->symbol == SYM_MISSING) // x.y := unset
+		{
+			// Completely delete the property, since other sections currently aren't designed to handle properties
+			// with no value (unlike Array and Map items).
+			mFields.Remove((index_t)(field - mFields), 1);
+			return OK;
+		}
+		if (field->Assign(**actual_param))
 			return OK;
 		return aResultToken.MemoryError();
 	}
@@ -807,7 +822,7 @@ void Map::__Item(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *
 			{
 				auto result = Invoke(aResultToken, IT_GET, _T("Default"), ExprTokenType { this }, nullptr, 0);
 				if (result == INVOKE_NOT_HANDLED)
-					_o_throw(ERR_ITEM_UNSET, ParamIndexToString(0, _f_number_buf), ErrorPrototype::UnsetItem);
+					_o_throw(ERR_ITEM_UNSET, *aParam[0], ErrorPrototype::UnsetItem);
 				return;
 			}
 			// Otherwise, caller provided a default value.
@@ -984,7 +999,7 @@ bool Object::CanSetBase(Object *aBase)
 	auto new_native_base = (!aBase || aBase->IsNativeClassPrototype())
 		? aBase : aBase->GetNativeBase();
 	return new_native_base == GetNativeBase() // Cannot change native type.
-		&& !aBase->IsDerivedFrom(this); // Cannot create loops.
+		&& !aBase->IsDerivedFrom(this) && aBase != this; // Cannot create loops.
 }
 
 
@@ -1175,7 +1190,7 @@ void Map::Delete(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *
 	{
 		// Our return value when only one arg is given is supposed to be the value
 		// removed from this[arg].  Since this[arg] would throw an exception...
-		_o_throw(ERR_ITEM_UNSET, ParamIndexToString(0, _f_number_buf), ErrorPrototype::UnsetItem);
+		_o_throw(ERR_ITEM_UNSET, *aParam[0], ErrorPrototype::UnsetItem);
 	}
 	// Set return value to the removed item.
 	item->ReturnMove(aResultToken);
@@ -1237,8 +1252,7 @@ void Map::CaseSense(ResultToken &aResultToken, int aID, int aFlags, ExprTokenTyp
 	if (mCount)
 		_o_throw(_T("Map must be empty"));
 
-	LPTSTR value = ParamIndexToString(0, _f_number_buf);
-	switch (Line::ConvertStringCaseSense(value))
+	switch (TokenToStringCase(*aParam[0]))
 	{
 	case SCS_SENSITIVE:
 		mFlags &= ~(MapCaseless | MapUseLocale);
@@ -1250,7 +1264,7 @@ void Map::CaseSense(ResultToken &aResultToken, int aID, int aFlags, ExprTokenTyp
 		mFlags = (mFlags | MapCaseless) & ~MapUseLocale;
 		break;
 	default:
-		_o_throw_value(ERR_INVALID_VALUE, value);
+		_o_throw(ERR_INVALID_VALUE, *aParam[0], ErrorPrototype::Value);
 	}
 }
 
@@ -1331,13 +1345,13 @@ void Map::Capacity(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType
 
 void Object::OwnProps(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount)
 {
-	_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 1)
+	_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 0)
 		, static_cast<IndexEnumerator::Callback>(&Object::GetEnumProp)));
 }
 
 void Map::__Enum(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount)
 {
-	_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 1)
+	_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 0)
 		, static_cast<IndexEnumerator::Callback>(&Map::GetEnumItem)));
 }
 
@@ -1498,7 +1512,7 @@ void Object::GetOwnPropDesc(ResultToken &aResultToken, int aID, int aFlags, Expr
 	if (!field)
 		_o__ret(aResultToken.UnknownMemberError(ExprTokenType(this), IT_GET, name));
 	auto desc = Object::Create();
-	desc->SetInternalCapacity(1 + (field->symbol == SYM_DYNAMIC));
+	desc->SetInternalCapacity(field->symbol == SYM_DYNAMIC ? 3 : 1);
 	if (field->symbol == SYM_DYNAMIC)
 	{
 		if (auto getter = field->prop->Getter()) desc->SetOwnProp(_T("Get"), getter);
@@ -1804,7 +1818,7 @@ ResultType Array::SetCapacity(index_t aNewCapacity)
 	if (mLength > aNewCapacity)
 		RemoveAt(aNewCapacity, mLength - aNewCapacity);
 	auto new_item = (Variant *)realloc(mItem, sizeof(Variant) * aNewCapacity);
-	if (!new_item)
+	if (!new_item && aNewCapacity)
 		return FAIL;
 	mItem = new_item;
 	mCapacity = aNewCapacity;
@@ -1957,7 +1971,7 @@ void Array::Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType
 	{
 		auto index = ParamToZeroIndex(*aParam[IS_INVOKE_SET ? 1 : 0]);
 		if (index >= mLength)
-			_o_throw(ERR_INVALID_INDEX, ParamIndexToString(IS_INVOKE_SET ? 1 : 0, _f_number_buf), ErrorPrototype::Index);
+			_o_throw(ERR_INVALID_INDEX, *aParam[IS_INVOKE_SET ? 1 : 0], ErrorPrototype::Index);
 		auto &item = mItem[index];
 		if (IS_INVOKE_SET)
 		{
@@ -1975,7 +1989,7 @@ void Array::Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType
 			auto result = Object::Invoke(aResultToken, IT_GET, _T("Default"), ExprTokenType{this}, nullptr, 0);
 			if (result != INVOKE_NOT_HANDLED)
 				_o_return_retval;
-			_o_throw(ERR_ITEM_UNSET, ParamIndexToString(0, _f_number_buf), ErrorPrototype::UnsetItem);
+			_o_throw(ERR_ITEM_UNSET, *aParam[0], ErrorPrototype::UnsetItem);
 		}
 		item.ReturnRef(aResultToken);
 		_o_return_retval;
@@ -2032,11 +2046,17 @@ void Array::Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType
 			index = mLength - 1;
 		}
 		
-		index_t count = (index_t)ParamIndexToOptionalInt64(1, 1);
+		index_t count = 1;
+		bool return_it = ParamIndexIsOmitted(1);
+		if (!return_it)
+		{
+			Throw_if_Param_NaN(1);
+			count = (index_t)ParamIndexToInt64(1);
+		}
 		if (index + count > mLength)
 			_o_throw_param(1);
 
-		if (aParamCount < 2) // Remove-and-return mode.
+		if (return_it) // Remove-and-return mode.
 		{
 			mItem[index].ReturnMove(aResultToken);
 			if (aResultToken.Exited())
@@ -2069,7 +2089,7 @@ void Array::Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType
 		_o_throw_oom;
 
 	case M___Enum:
-		_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 1)
+		_o_return(new IndexEnumerator(this, ParamIndexToOptionalInt(0, 0)
 			, static_cast<IndexEnumerator::Callback>(&Array::GetEnumItem)));
 	}
 }
@@ -2077,7 +2097,7 @@ void Array::Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType
 Array::index_t Array::ParamToZeroIndex(ExprTokenType &aParam)
 {
 	if (!TokenIsNumeric(aParam))
-		return -1;
+		return BadIndex;
 	auto index = TokenToInt64(aParam);
 	if (index <= 0) // Let -1 be the last item and 0 be the first unused index.
 		index += mLength + 1;
@@ -2145,7 +2165,7 @@ bool EnumBase::Call(ResultToken &aResultToken, ExprTokenType *aParam[], int aPar
 
 ResultType IndexEnumerator::Next(Var *var0, Var *var1)
 {
-	return (mObject->*mGetItem)(++mIndex, var0, var1, mParamCount);
+	return (mObject->*mGetItem)(++mIndex, var0, var1, mParamCount ? mParamCount : var1 ? 2 : 1);
 }
 
 
@@ -2232,7 +2252,7 @@ ResultType RegExMatchObject::GetEnumItem(UINT &aIndex, Var *aKey, Var *aVal, int
 		return CONDITION_FALSE;
 	// In single-var mode, return the subpattern values.
 	// Otherwise, return the subpattern names first and values second.
-	if (aVarCount < 2)
+	if (aVarCount == 1)
 	{
 		aVal = aKey;
 		aKey = nullptr;
@@ -2618,8 +2638,15 @@ bool BoundFunc::Call(ResultToken &aResultToken, ExprTokenType *aParam[], int aPa
 	this_token.object = mFunc;
 
 	// Call the function or object.
-	return mFunc->Invoke(aResultToken, mFlags, mMember, this_token, aParam, aParamCount);
-	//return CallFunc(*mFunc, aResultToken, params, param_count);
+	switch (mFunc->Invoke(aResultToken, mFlags, mMember, this_token, aParam, aParamCount))
+	{
+	case FAIL:
+		return FAIL;
+	default:
+		return OK;
+	case INVOKE_NOT_HANDLED:
+		return aResultToken.UnknownMemberError(this_token, IT_CALL, mMember);
+	}
 }
 
 BoundFunc *BoundFunc::Bind(IObject *aFunc, int aFlags, LPCTSTR aMember, ExprTokenType **aParam, int aParamCount)
@@ -2673,19 +2700,26 @@ bool FreeVars::FullyReleased(ULONG aRefPendingRelease)
 	// This function is part of a workaround for circular references that occur because all closures
 	// have a reference to this FreeVars, while any closure referenced by itself or another closure
 	// has a reference in mVar[].
+	// aRefPendingRelease is 0 when this is being released the normal way (due to either the outer
+	// function returning or a non-grouped Closure being deleted) and 1 when the script releases its
+	// last direct reference to a grouped Closure.
 	if (mRefCount)
-		return mRefCount < 0;
+		return mRefCount < 0; // Negative values mean a previous call (still on the stack) is deleting this.
 	int circular_closures = 0;
+	ULONG extra_references = 0;
 	for (int i = 0; i < mVarCount; ++i)
 		if (mVar[i].Type() == VAR_CONSTANT)
 		{
 			ASSERT(mVar[i].HasObject() && dynamic_cast<ObjectBase*>(mVar[i].Object())); // Any object in VAR_CONSTANT must derive from ObjectBase.
 			auto obj = (ObjectBase *)mVar[i].Object();
-			if (obj->RefCount() && aRefPendingRelease == 0)
-				return false;
-			--aRefPendingRelease;
+			extra_references += obj->RefCount();
 			++circular_closures;
 		}
+	// aRefPendingRelease == 0 && extra_references > 0: keep alive.
+	// aRefPendingRelease == 1 && extra_references > 1: keep alive.
+	// aRefPendingRelease == 1 && extra_references == 1: delete, because that one Closure is being deleted.
+	if (extra_references > aRefPendingRelease)
+		return false;
 	--mRefCount; // Now that delete is certain, make this non-zero to prevent reentry.
 	if (circular_closures)
 	{
@@ -2704,10 +2738,10 @@ bool FreeVars::FullyReleased(ULONG aRefPendingRelease)
 }
 
 
-ResultType IObjectPtr::ExecuteInNewThread(TCHAR *aNewThreadDesc, ExprTokenType *aParamValue, int aParamCount, __int64 *aRetVal) const
+ResultType IObjectPtr::ExecuteInNewThread(TCHAR *aNewThreadDesc, ExprTokenType *aParamValue, int aParamCount, bool aReturnBoolean) const
 {
 	DEBUGGER_STACK_PUSH(aNewThreadDesc)
-	ResultType result = CallMethod(mObject, mObject, nullptr, aParamValue, aParamCount, aRetVal);
+	ResultType result = CallMethod(mObject, mObject, nullptr, aParamValue, aParamCount, nullptr, 0, aReturnBoolean);
 	DEBUGGER_STACK_POP()
 	return result;
 }
@@ -2777,7 +2811,12 @@ ResultType MsgMonitorList::Call(ExprTokenType *aParamValue, int aParamCount, UIN
 		// Set last found window (as documented).
 		g->hWndLastUsed = aGui->mHwnd;
 		
-		result = CallMethod(func, func, method_name, aParamValue, aParamCount, &retval);
+		// If we're about to call a method of the Gui itself, don't pass the Gui as the first parameter
+		// since it will be in `this`.  Doing this here rather than when the parameters are built ensures
+		// that message monitor functions (not methods) still receive the expected Gui parameter.
+		int skip_arg = func == aGui && mon.is_method && aParamValue->symbol == SYM_OBJECT && aParamValue->object == aGui;
+
+		result = CallMethod(func, func, method_name, aParamValue + skip_arg, aParamCount - skip_arg, &retval);
 		if (result == FAIL) // Callback encountered an error.
 			break;
 		if (result == EARLY_RETURN) // Callback returned a non-empty value.
@@ -2882,15 +2921,19 @@ void ClipboardAll::__New(ResultToken &aResultToken, int aID, int aFlags, ExprTok
 		else
 		{
 			// Caller supplied an address.
+			Throw_if_Param_NaN(0);
 			caller_data = (size_t)ParamIndexToIntPtr(0);
 			if (caller_data < 65536) // Basic check to catch incoming raw addresses that are zero or blank.  On Win32, the first 64KB of address space is always invalid.
 				_o_throw_param(0);
 			size = -1;
 		}
 		if (!ParamIndexIsOmitted(1))
+		{
+			Throw_if_Param_NaN(1);
 			size = (size_t)ParamIndexToIntPtr(1);
+		}
 		else if (size == -1) // i.e. it can be omitted when size != -1 (a string was passed).
-			_o_throw_value(ERR_PARAM2_MUST_NOT_BE_BLANK);
+			return (void)aResultToken.ParamError(1, nullptr);
 		if (  !(data = malloc(size))  ) // More likely to be due to invalid parameter than out of memory.
 			_o_throw_oom;
 		memcpy(data, (void *)caller_data, size);
@@ -2987,7 +3030,7 @@ void DefineClasses(Object *aBaseClass, Object *aBaseProto, std::initializer_list
 }
 
 
-Object *Object::CreateRootPrototypes()
+void Object::CreateRootPrototypes()
 {
 	// Create the root prototypes before defining any members, since
 	// each member relies on Func::sPrototype having been initialized.
@@ -3097,11 +3140,9 @@ Object *Object::CreateRootPrototypes()
 	// Permit Object.Call to construct Error objects.
 	ErrorPrototype::Error->mFlags &= ~NativeClassPrototype;
 	ErrorPrototype::OS->mFlags &= ~NativeClassPrototype;
-
-	return sAnyPrototype;
 }
 
-Object *Object::sAnyPrototype = CreateRootPrototypes();
+Object *Object::sAnyPrototype;
 Object *Func::sPrototype;
 Object *Object::sPrototype;
 

@@ -7,11 +7,11 @@ extern bool g_ComErrorNotify;
 class ComObject;
 class ComEvent : public ObjectBase
 {
-	DWORD mCookie;
+	DWORD mCookie = 0;
 	ComObject *mObject;
-	ITypeInfo *mTypeInfo;
+	ITypeInfo *mTypeInfo = nullptr;
 	IID mIID;
-	IObject *mAhkObject;
+	IObject *mAhkObject = nullptr;
 	TCHAR mPrefix[64];
 
 public:
@@ -27,18 +27,11 @@ public:
 	IObject_Type_Impl("ComEvent") // Unlikely to be called; see above.
 	Object *Base() { return nullptr; }
 
-	HRESULT Connect(LPTSTR pfx = NULL, IObject *ahkObject = NULL);
+	HRESULT Connect(ITypeInfo *tinfo = nullptr, IID *iid = nullptr);
+	void SetPrefixOrSink(LPCTSTR pfx, IObject *ahkObject);
 
-	ComEvent(ComObject *obj, ITypeInfo *tinfo, IID iid)
-		: mCookie(0), mObject(obj), mTypeInfo(tinfo), mIID(iid), mAhkObject(NULL)
-	{
-	}
-	~ComEvent()
-	{
-		mTypeInfo->Release();
-		if (mAhkObject)
-			mAhkObject->Release();
-	}
+	ComEvent(ComObject *obj) : mObject(obj) { }
+	~ComEvent();
 
 	friend class ComObject;
 };
@@ -103,9 +96,9 @@ public:
 		{
 			if (mEventSink)
 			{
-				mEventSink->Connect();
-				mEventSink->mObject = NULL;
-				mEventSink->Release();
+				mEventSink->Connect(FALSE);
+				if (mEventSink) // i.e. it wasn't fully released as a result of calling Unadvise().
+					mEventSink->mObject = nullptr;
 			}
 			mUnknown->Release();
 		}
@@ -124,14 +117,12 @@ public:
 class ComEnum : public EnumBase
 {
 	IEnumVARIANT *penum;
+	bool cheat;
 
 public:
 	ResultType Next(Var *aOutput, Var *aOutputType);
 
-	ComEnum(IEnumVARIANT *enm)
-		: penum(enm)
-	{
-	}
+	ComEnum(IEnumVARIANT *enm);
 	~ComEnum()
 	{
 		penum->Release();
@@ -158,6 +149,30 @@ public:
 	static HRESULT Begin(ComObject *aArrayObject, ComArrayEnum *&aOutput, int aMode);
 	ResultType Next(Var *aVar1, Var *aVar2);
 	~ComArrayEnum();
+};
+
+
+// Adapts an AutoHotkey enumerator object to the IEnumVARIANT COM interface.
+class EnumComCompat : public IEnumVARIANT, public IServiceProvider
+{
+	IObject *mEnum;
+	int mRefCount;
+	bool mCheat;
+
+public:
+	EnumComCompat(IObject *enumObj) : mEnum(enumObj), mRefCount(1), mCheat(false) {}
+	~EnumComCompat() { mEnum->Release(); }
+
+	STDMETHODIMP QueryInterface(REFIID riid, void **ppvObject);
+	STDMETHODIMP_(ULONG) AddRef();
+	STDMETHODIMP_(ULONG) Release();
+
+	STDMETHODIMP Next(ULONG celt, /*out*/ VARIANT *rgVar, /*out*/ ULONG *pCeltFetched);
+	STDMETHODIMP Skip(ULONG celt);
+	STDMETHODIMP Reset();
+	STDMETHODIMP Clone(/*out*/ IEnumVARIANT **ppEnum);
+
+	STDMETHODIMP QueryService(REFGUID guidService, REFIID riid, void **ppvObject);
 };
 
 

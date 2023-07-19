@@ -77,19 +77,21 @@ bool FileCreateDir(LPCTSTR aDirSpec)
 
 static bool FileCreateDirRecursive(LPTSTR aDirSpec)
 {
+	// The following check also serves to support UNC paths like "\\server\share\path"
+	// by preventing the section below from recursing into "\\server\share" (or further)
+	// if the share exists.
 	DWORD attr = GetFileAttributes(aDirSpec);
 	if (attr != 0xFFFFFFFF)  // aDirSpec already exists.
 	{
 		SetLastError(ERROR_ALREADY_EXISTS);
 		return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0; // Indicate success if it already exists as a dir.
 	}
-
+	
 	// If it has a backslash, make sure all its parent directories exist before we attempt
 	// to create this directory:
 	LPTSTR last_backslash = _tcsrchr(aDirSpec, '\\');
 	if (last_backslash > aDirSpec // v1.0.48.04: Changed "last_backslash" to "last_backslash > aDirSpec" so that an aDirSpec with a leading \ (but no other backslashes), such as \dir, is supported.
-		&& last_backslash[-1] != ':' // v1.1.31.00: Don't attempt FileCreateDir("C:") since that's equivalent to either "C:\" or the working directory (which already exists), or FileCreateDir("\\?\C:") since it always fails.
-		&& last_backslash[1]) // Skip the recursive call if it's just a trailing backslash.
+		&& last_backslash[-1] != ':') // v1.1.31.00: Don't attempt FileCreateDir("C:") since that's equivalent to either "C:\" or the working directory (which already exists), or FileCreateDir("\\?\C:") since it always fails.
 	{
 		*last_backslash = '\0'; // Temporarily terminate for parent directory.
 		auto exists = FileCreateDirRecursive(aDirSpec); // Recursively create all needed ancestor directories.
@@ -100,7 +102,7 @@ static bool FileCreateDirRecursive(LPTSTR aDirSpec)
 
 	// The above has recursively created all parent directories of aDirSpec if needed.
 	// Now we can create aDirSpec.
-	return CreateDirectory(aDirSpec, NULL);
+	return CreateDirectory(aDirSpec, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
 
@@ -165,8 +167,6 @@ bif_impl FResult FileRead(StrArg aFilespec, optl<StrArg> aOptions, ResultToken &
 	if (!*aFilespec)
 		return FR_E_ARG(0); // Seems more helpful than throwing OSError(3).
 
-	const DWORD DWORD_MAX = ~0;
-
 	// Set default options:
 	bool translate_crlf_to_lf = false;
 	unsigned __int64 max_bytes_to_load = ULLONG_MAX; // By default, fail if the file is too large.  See comments near bytes_to_read below.
@@ -199,22 +199,22 @@ bif_impl FResult FileRead(StrArg aFilespec, optl<StrArg> aOptions, ResultToken &
 	// In addition to imposing the limit set by the *M option, the following check prevents an error
 	// caused by 64 to 32-bit truncation -- that is, a file size of 0x100000001 would be truncated to
 	// 0x1, allowing the command to complete even though it should fail.  UPDATE: This check was never
-	// sufficient since max_bytes_to_load could exceed DWORD_MAX on x64 (prior to v1.1.16).  It's now
+	// sufficient since max_bytes_to_load could exceed MAXDWORD on x64 (prior to v1.1.16).  It's now
 	// checked separately below to try to match the documented behaviour (truncating the data only to
 	// the caller-specified limit).
 	if (bytes_to_read > max_bytes_to_load) // This is the limit set by the caller.
 		bytes_to_read = max_bytes_to_load;
-	// Fixed for v1.1.16: Show an error message if the file is larger than DWORD_MAX, otherwise the
-	// truncation issue described above could occur.  Reading more than DWORD_MAX could be supported
+	// Fixed for v1.1.16: Show an error message if the file is larger than MAXDWORD, otherwise the
+	// truncation issue described above could occur.  Reading more than MAXDWORD could be supported
 	// by calling ReadFile() in a loop, but it seems unlikely that a script will genuinely want to
 	// do this AND actually be able to allocate a 4GB+ memory block (having 4GB of total free memory
 	// is usually not sufficient, perhaps due to memory fragmentation).
 #ifdef _WIN64
-	if (bytes_to_read > DWORD_MAX)
+	if (bytes_to_read > MAXDWORD)
 #else
 	// Reserve 2 bytes to avoid integer overflow below.  Although any amount larger than 2GB is almost
 	// guaranteed to fail at the malloc stage, that might change if we ever become large address aware.
-	if (bytes_to_read > DWORD_MAX - sizeof(wchar_t))
+	if (bytes_to_read > MAXDWORD - sizeof(wchar_t))
 #endif
 	{
 		CloseHandle(hfile);
@@ -665,7 +665,7 @@ bif_impl FResult FileSetAttrib(StrArg aAttributes, optl<StrArg> aFilePattern, op
 			break;
 		}
 	}
-	return FilePatternApply(aFilePattern.value(), aOperateOnFolders, aDoRecurse, FileSetAttribCallback, &attrib);
+	return FilePatternApply(path, aOperateOnFolders, aDoRecurse, FileSetAttribCallback, &attrib);
 }
 
 BOOL FileSetAttribCallback(LPCTSTR file_path, WIN32_FIND_DATA &current_file, void *aCallbackData)

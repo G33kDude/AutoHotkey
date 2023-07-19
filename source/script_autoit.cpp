@@ -201,28 +201,33 @@ bif_impl FResult PixelGetColor(int aX, int aY, optl<StrArg> aMode, StrRet &aRetV
 
 
 
-BIF_DECL(BIF_MenuSelect)
+bif_impl FResult MenuSelect(ExprTokenType *aWinTitle, optl<StrArg> aWinText, StrArg aMenu
+	, optl<StrArg> a1, optl<StrArg> a2, optl<StrArg> a3, optl<StrArg> a4, optl<StrArg> a5, optl<StrArg> a6
+	, optl<StrArg> aExcludeTitle, optl<StrArg> aExcludeText)
 {
-	const int max_menu_params = 7;
-	int menu_param_index = 2;
-	int menu_param_end = min(aParamCount, menu_param_index + max_menu_params);
-
 	HWND target_window;
-	if (!DetermineTargetWindow(target_window, aResultToken, aParam, aParamCount, max_menu_params))
-		return;
+	DETERMINE_TARGET_WINDOW;
+	
+	LPCTSTR names[] { aMenu, a1.value_or_null(), a2.value_or_null(), a3.value_or_null(), a4.value_or_null(), a5.value_or_null(), a6.value_or_null() };
+	int name_index = 0, name_count = 0;
+	// Count up to the last present name parameter.
+	for (int i = 0; i < _countof(names); ++i)
+		if (names[i])
+			name_count = i + 1;
+	// Any omitted parameters preceding name_count will be detected by the main loop as invalid.
 
 	UINT message = WM_COMMAND;
 	HMENU hMenu;
-	if (!_tcsicmp(ParamIndexToOptionalString(menu_param_index), _T("0&")))
+	if (!_tcsicmp(names[0], _T("0&")))
 	{
 		hMenu = GetSystemMenu(target_window, FALSE);
-		menu_param_index += 1;
+		name_index += 1;
 		message = WM_SYSCOMMAND;
 	}
 	else
 		hMenu = GetMenu(target_window);
 	if (!hMenu) // Window has no menu bar.
-		_f_throw(ERR_WINDOW_HAS_NO_MENU, ErrorPrototype::Target);
+		return FError(ERR_WINDOW_HAS_NO_MENU, nullptr, ErrorPrototype::Target);
 
 	int menu_item_count = GetMenuItemCount(hMenu);
 	//if (menu_item_count < 1) // Menu bar has no menus.
@@ -244,22 +249,22 @@ else\
 	bool match_found;
 	size_t this_menu_param_length, menu_text_length;
 	int pos, target_menu_pos;
-	LPTSTR this_menu_param = nullptr;
+	LPCTSTR this_menu_param = nullptr;
 
-	for ( ; menu_param_index < menu_param_end; ++menu_param_index)
+	for ( ; name_index < name_count; ++name_index)
 	{
 		if (!hMenu)  // The nesting of submenus ended prior to the end of the list of menu search terms.
-			goto error;
-		this_menu_param = ParamIndexToOptionalString(menu_param_index, _f_number_buf);
-		if (!*this_menu_param)
-			goto error;
+			break;
+		this_menu_param = names[name_index];
+		if (!this_menu_param || !*this_menu_param)
+			break;
 
 		this_menu_param_length = _tcslen(this_menu_param);
 		target_menu_pos = (this_menu_param[this_menu_param_length - 1] == '&') ? ATOI(this_menu_param) - 1 : -1;
 		if (target_menu_pos > -1)
 		{
 			if (target_menu_pos >= menu_item_count)  // Invalid menu position (doesn't exist).
-				goto error;
+				break;
 			UPDATE_MENU_VARS(target_menu_pos)
 		}
 		else // Searching by text rather than numerical position.
@@ -306,22 +311,21 @@ else\
 				}
 			} // inner for()
 			if (!match_found) // The search hierarchy (nested menus) specified in the params could not be found.
-				goto error;
+				break;
 		} // else
 	} // outer for()
 
+	if (name_index < name_count)
+		return FR_E_ARG(2 + name_index);
 	// This would happen if the outer loop above had zero iterations due to aMenu1 being NULL or blank,
 	// or if the caller specified a submenu as the target (which doesn't seem valid since an app would
 	// never expect to ever receive a message for a submenu?):
 	if (menu_id == MENU_ITEM_IS_SUBMENU)
-		goto error;
+		return FR_E_ARG(2 + name_count - 1);
 
 	// Since the above didn't return, the specified search hierarchy was completely found.
 	PostMessage(target_window, message, (WPARAM)menu_id, 0);
-	_f_return_empty;
-
-error:
-	_f_throw_value(ERR_PARAM_INVALID, this_menu_param);
+	return OK;
 }
 
 
@@ -930,7 +934,7 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 	// v1.0.44.07: Set default to INTERNET_FLAG_RELOAD vs. 0 because the vast majority of usages would want
 	// the file to be retrieved directly rather than from the cache.
 	// v1.0.46.04: Added more no-cache flags because otherwise, it definitely falls back to the cache if
-	// the remote server doesn't repond (and perhaps other errors), which defeats the ability to use the
+	// the remote server doesn't respond (and perhaps other errors), which defeats the ability to use the
 	// Download command for uptime/server monitoring.  Also, in spite of what MSDN says, it seems nearly
 	// certain based on other sources that more than one flag is supported.  Someone also mentioned that
 	// INTERNET_FLAG_CACHE_IF_NET_FAIL is related to this, but there's no way to specify it in these
@@ -961,13 +965,13 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 		return FR_E_WIN32;
 	}
 
-	// Open our output file
-	FILE *fptr = _tfopen(aFilespec, _T("wb"));	// Open in binary write/destroy mode
-	if (!fptr)
+	// Open our output file (overwrite if necessary)
+	auto hOut = CreateFile(aFilespec, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+	if (hOut == INVALID_HANDLE_VALUE)
 	{
 		InternetCloseHandle(hFile);
 		InternetCloseHandle(hInet);
-		return FR_E_FAILED;
+		return FR_E_WIN32;
 	}
 
 	BYTE bufData[1024 * 1]; // v1.0.44.11: Reduced from 8 KB to alleviate GUI window lag during Download.  Testing shows this reduction doesn't affect performance on high-speed downloads (in fact, downloads are slightly faster; I tested two sites, one at 184 KB/s and the other at 380 KB/s).  It might affect slow downloads, but that seems less likely so wasn't tested.
@@ -984,6 +988,7 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 	// having it return the moment there is any data in the buffer, the program is made more
 	// responsive, especially when the download is very slow and/or one of the hooks is installed:
 	BOOL result;
+	DWORD bytes_written;
 	if (*aURL == 'h' || *aURL == 'H')
 	{
 		while (result = InternetReadFileExA(hFile, &buffers, IRF_NO_WAIT, NULL)) // Assign
@@ -991,7 +996,9 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 			if (!buffers.dwBufferLength) // Transfer is complete.
 				break;
 			LONG_OPERATION_UPDATE  // Done in between the net-read and the file-write to improve avg. responsiveness.
-			fwrite(bufData, buffers.dwBufferLength, 1, fptr);
+			result = WriteFile(hOut, bufData, buffers.dwBufferLength, &bytes_written, nullptr);
+			if (!result)
+				break;
 			buffers.dwBufferLength = sizeof(bufData);  // Reset buffer capacity for next iteration.
 		}
 	}
@@ -1003,7 +1010,9 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 			if (!number_of_bytes_read)
 				break;
 			LONG_OPERATION_UPDATE
-			fwrite(bufData, number_of_bytes_read, 1, fptr);
+			result = WriteFile(hOut, bufData, number_of_bytes_read, &bytes_written, nullptr);
+			if (!result)
+				break;
 		}
 	}
 	DWORD last_error = GetLastError();
@@ -1011,7 +1020,7 @@ bif_impl FResult Download(StrArg aURL, StrArg aFilespec)
 	InternetCloseHandle(hFile);
 	InternetCloseHandle(hInet);
 	// Close output file:
-	fclose(fptr);
+	CloseHandle(hOut);
 
 	if (!result) // An error occurred during the transfer.
 	{
@@ -1161,9 +1170,6 @@ bif_impl FResult FileGetShortcut(StrArg aShortcutFile, StrRet *aTarget, StrRet *
 	, StrRet *aArgs, StrRet *aDesc, StrRet *aIcon, ResultToken *aIconNum, int *aRunState)
 // Credited to Holger <Holger.Kotsch at GMX de>.
 {
-	if (!Line::Util_DoesFileExist(aShortcutFile))
-		return FR_E_FAILED;
-
 	CoInitialize(NULL);
 	IShellLink *psl;
 	HRESULT hr;
@@ -1729,35 +1735,6 @@ void Line::Util_ExpandFilenameWildcardPart(LPCTSTR szSource, LPCTSTR szDest, LPT
 
 
 
-bool Line::Util_DoesFileExist(LPCTSTR szFilename)  // Returns true if file or directory exists.
-{
-	if ( _tcschr(szFilename,'*')||_tcschr(szFilename,'?') )
-	{
-		WIN32_FIND_DATA	wfd;
-		HANDLE			hFile;
-
-		hFile = FindFirstFile(szFilename, &wfd);
-
-		if ( hFile == INVALID_HANDLE_VALUE )
-			return false;
-
-		FindClose(hFile);
-		return true;
-	}
-    else
-	{
-		DWORD dwTemp;
-
-		dwTemp = GetFileAttributes(szFilename);
-		if ( dwTemp != 0xffffffff )
-			return true;
-		else
-			return false;
-	}
-}
-
-
-
 bool Line::Util_IsDir(LPCTSTR szPath) // Returns true if the path is a directory
 {
 	DWORD dwTemp = GetFileAttributes(szPath);
@@ -1916,12 +1893,12 @@ void DoIncrementalMouseMove(int aX1, int aY1, int aX2, int aY2, int aSpeed)
 // PROCESS ROUTINES
 ////////////////////
 
-DWORD ProcessExist(LPCTSTR aProcess)
+DWORD ProcessExist(LPCTSTR aProcess, bool aGetParent)
 {
 	// Determine the PID if aProcess is a pure, non-negative integer (any negative number
 	// is more likely to be the name of a process [with a leading dash], rather than the PID).
 	DWORD specified_pid = IsNumeric(aProcess) ? ATOU(aProcess) : 0;
-	if (specified_pid)
+	if (specified_pid && !aGetParent)
 	{
 		// Most of the time while a PID is being used, the process still exists.  So try opening
 		// the process directly, since doing so is much faster than enumerating all processes:
@@ -1962,7 +1939,7 @@ DWORD ProcessExist(LPCTSTR aProcess)
 		if (specified_pid && specified_pid == proc.th32ProcessID)
 		{
 			CloseHandle(snapshot);
-			return specified_pid;
+			return aGetParent ? proc.th32ParentProcessID : specified_pid;
 		}
 		// Otherwise, check for matching name even if aProcess is purely numeric (i.e. a number might
 		// also be a valid name?):
@@ -1973,7 +1950,7 @@ DWORD ProcessExist(LPCTSTR aProcess)
 		if (!_tcsicmp(proc_name, aProcess)) // lstrcmpi() is not used: 1) avoids breaking existing scripts; 2) provides consistent behavior across multiple locales; 3) performance.
 		{
 			CloseHandle(snapshot);
-			return proc.th32ProcessID;
+			return aGetParent ? proc.th32ParentProcessID : proc.th32ProcessID;
 		}
 	}
 	CloseHandle(snapshot);

@@ -32,6 +32,7 @@ ResultType TrayTipParseOptions(LPCTSTR aOptions, NOTIFYICONDATA &nic)
 {
 	if (!aOptions)
 		return OK;
+	DWORD flag;
 	LPCTSTR next_option, option_end;
 	TCHAR option[1+MAX_NUMBER_SIZE];
 	for (next_option = omit_leading_whitespace(aOptions); ; next_option = omit_leading_whitespace(option_end))
@@ -67,9 +68,9 @@ ResultType TrayTipParseOptions(LPCTSTR aOptions, NOTIFYICONDATA &nic)
 		{
 			nic.dwInfoFlags |= NIIF_NOSOUND;
 		}
-		else if (IsNumeric(option, FALSE, FALSE, FALSE))
+		else if (ParseInteger(option, flag))
 		{
-			nic.dwInfoFlags |= ATOI(option);
+			nic.dwInfoFlags |= flag;
 		}
 		else
 		{
@@ -141,11 +142,10 @@ LRESULT CALLBACK MainWindowProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lPar
 
 	// See GuiWindowProc() for details about this first section:
 	LRESULT msg_reply;
-	if (g_MsgMonitor.Count() // Count is checked here to avoid function-call overhead.
-		&& (!g->CalledByIsDialogMessageOrDispatch || g->CalledByIsDialogMessageOrDispatchMsg != iMsg) // v1.0.44.11: If called by IsDialog or Dispatch but they changed the message number, check if the script is monitoring that new number.
-		&& MsgMonitor(hWnd, iMsg, wParam, lParam, NULL, msg_reply))
+	if (g->CalledByIsDialogMessageOrDispatch && g->CalledByIsDialogMessageOrDispatchMsg == iMsg)
+		g->CalledByIsDialogMessageOrDispatch = false; // Suppress this one message, not any other messages that could be sent due to recursion.
+	else if (g_MsgMonitor.Count() && MsgMonitor(hWnd, iMsg, wParam, lParam, NULL, msg_reply))
 		return msg_reply; // MsgMonitor has returned "true", indicating that this message should be omitted from further processing.
-	g->CalledByIsDialogMessageOrDispatch = false; // v1.0.40.01.
 
 	TRANSLATE_AHK_MSG(iMsg, wParam)
 	
@@ -954,6 +954,7 @@ ResultType MsgBoxParseOptions(LPCTSTR aOptions, int &aType, double &aTimeout, HW
 	//int button_option = 0;
 	//int icon_option = 0;
 
+	int option_int;
 	LPCTSTR next_option, option_end;
 	TCHAR option[1+MAX_NUMBER_SIZE];
 	for (next_option = omit_leading_whitespace(aOptions); ; next_option = omit_leading_whitespace(option_end))
@@ -986,12 +987,11 @@ ResultType MsgBoxParseOptions(LPCTSTR aOptions, int &aType, double &aTimeout, HW
 				goto invalid_option;
 			}
 		}
-		else if (!_tcsnicmp(option, _T("Default"), 7) && IsNumeric(option + 7, FALSE, FALSE, FALSE))
+		else if (!_tcsnicmp(option, _T("Default"), 7) && ParseInteger(option + 7, option_int))
 		{
-			int default_button = ATOI(option + 7);
-			if (default_button < 1 || default_button > 0xF) // Currently MsgBox can only have 4 buttons, but MB_DEFMASK may allow for up to this many in future.
+			if (option_int < 1 || option_int > 0xF) // Currently MsgBox can only have 4 buttons, but MB_DEFMASK may allow for up to this many in future.
 				goto invalid_option;
-			aType = (aType & ~MB_DEFMASK) | ((default_button - 1) << 8); // 1=0, 2=0x100, 3=0x200, 4=0x300
+			aType = (aType & ~MB_DEFMASK) | ((option_int - 1) << 8); // 1=0, 2=0x100, 3=0x200, 4=0x300
 		}
 		else if (toupper(*option) == 'T' && IsNumeric(option + 1, FALSE, FALSE, TRUE))
 		{
@@ -1001,16 +1001,15 @@ ResultType MsgBoxParseOptions(LPCTSTR aOptions, int &aType, double &aTimeout, HW
 		{
 			aOwner = (HWND)ATOI64(option + 5); // This should be consistent with the Gui +Owner option.
 		}
-		else if (IsNumeric(option, FALSE, FALSE, FALSE))
+		else if (ParseInteger(option, option_int))
 		{
-			int other_option = ATOI(option);
 			// Clear any conflicting options which were previously set.
-			if (other_option & MB_TYPEMASK) aType &= ~MB_TYPEMASK;
-			if (other_option & MB_ICONMASK) aType &= ~MB_ICONMASK;
-			if (other_option & MB_DEFMASK)  aType &= ~MB_DEFMASK;
-			if (other_option & MB_MODEMASK) aType &= ~MB_MODEMASK;
+			if (option_int & MB_TYPEMASK) aType &= ~MB_TYPEMASK;
+			if (option_int & MB_ICONMASK) aType &= ~MB_ICONMASK;
+			if (option_int & MB_DEFMASK)  aType &= ~MB_DEFMASK;
+			if (option_int & MB_MODEMASK) aType &= ~MB_MODEMASK;
 			// All remaining options are bit flags (or not conflicting).
-			aType |= other_option;
+			aType |= option_int;
 		}
 		else
 		{
@@ -1108,7 +1107,7 @@ bif_impl FResult MsgBox(optl<StrArg> aText, optl<StrArg> aTitle, optl<StrArg> aO
 // GUI-related: ToolTip //
 //////////////////////////
 
-bif_impl FResult ToolTip(optl<StrArg> aText, optl<int> aX, optl<int> aY, optl<int> aIndex, UINT_PTR &aRetVal)
+bif_impl FResult ToolTip(optl<StrArg> aText, optl<int> aX, optl<int> aY, optl<int> aIndex, UINT &aRetVal)
 {
 	int window_index = aIndex.value_or(1) - 1;
 	if (window_index < 0 || window_index >= MAX_TOOLTIPS)
@@ -1174,7 +1173,7 @@ bif_impl FResult ToolTip(optl<StrArg> aText, optl<int> aX, optl<int> aY, optl<in
 
 	TOOLINFO ti = { 0 };
 	ti.cbSize = sizeof(ti);
-	ti.uFlags = TTF_TRACK;
+	ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
 	ti.lpszText = const_cast<LPTSTR>(tip_text);
 	// ti.hwnd is the window to which notification messages are sent.  Set this to allow customization.
 	ti.hwnd = g_hWnd;
@@ -1294,7 +1293,7 @@ bif_impl FResult ToolTip(optl<StrArg> aText, optl<int> aX, optl<int> aY, optl<in
 	// And do a TTM_TRACKACTIVATE even if the tooltip window already existed upon entry to this function,
 	// so that in case it was hidden or dismissed while its HWND still exists, it will be shown again:
 	SendMessage(tip_hwnd, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
-	aRetVal = (UINT_PTR)tip_hwnd;
+	aRetVal = (UINT)(UINT_PTR)tip_hwnd;
 	return OK;
 }
 
@@ -1375,20 +1374,11 @@ bif_impl FResult MouseGetPos(int *aX, int *aY, ResultToken *aParent, ResultToken
 		return OK;
 	}
 
-	class_and_hwnd_type cah;
-	cah.hwnd = child_under_cursor;  // This is the specific control we need to find the sequence number of.
-	TCHAR class_name[WINDOW_CLASS_SIZE];
-	cah.class_name = class_name;
-	if (!GetClassName(cah.hwnd, class_name, _countof(class_name) - 5))  // -5 to allow room for sequence number.
-		return OK;
-	cah.class_count = 0;  // Init for the below.
-	cah.is_found = false; // Same.
-	EnumChildWindows(parent_under_cursor, EnumChildFindSeqNum, (LPARAM)&cah); // Find this control's seq. number.
-	if (!cah.is_found)
-		return OK;
-	// Append the class sequence number onto the class name and set the output param to be that value:
-	sntprintfcat(class_name, _countof(class_name), _T("%d"), cah.class_count);
-	if (!TokenSetResult(*aChild, class_name))
+	TCHAR class_nn[WINDOW_CLASS_NN_SIZE];
+	auto fr = ControlGetClassNN(parent_under_cursor, child_under_cursor, class_nn, _countof(class_nn));
+	if (fr != OK)
+		return fr;
+	if (!TokenSetResult(*aChild, class_nn))
 		return aChild->Exited() ? FR_FAIL : FR_ABORTED;
 	return OK;
 }
@@ -1651,7 +1641,7 @@ bif_impl FResult FileSelect(optl<StrArg> aOptions, optl<StrArg> aWorkingDir, opt
 		++options_str;
 		flags |= FOS_PICKFOLDERS;
 		if (*pattern)
-			return FValueError(ERR_PARAM4_MUST_BE_BLANK);
+			return FR_E_ARG(3);
 		filter_count = 0;
 		break;
 	case 'M':  // Multi-select.
@@ -1684,6 +1674,7 @@ bif_impl FResult FileSelect(optl<StrArg> aOptions, optl<StrArg> aWorkingDir, opt
 		flags |= FOS_PATHMUSTEXIST;
 	if (options & 0x01)
 		flags |= FOS_FILEMUSTEXIST;
+
 
 	// Despite old documentation indicating it was due to an "OS quirk", previous versions were specifically
 	// designed to enable the Save button when OFN_OVERWRITEPROMPT is present but not OFN_CREATEPROMPT, since
@@ -2172,10 +2163,7 @@ BIF_DECL(BIF_IsTypeish)
 	case VAR_TYPE_TIME:
 	{
 		SYSTEMTIME st;
-		// Also insist on numeric, because even though YYYYMMDDToFileTime() will properly convert a
-		// non-conformant string such as "2004.4", for future compatibility, we don't want to
-		// report that such strings are valid times:
-		if_condition = IsNumeric(aValueStr, false, false, false) && YYYYMMDDToSystemTime(aValueStr, st, true);
+		if_condition = YYYYMMDDToSystemTime(aValueStr, st, true);
 		break;
 	}
 	case VAR_TYPE_DIGIT:
@@ -2253,7 +2241,7 @@ BIF_DECL(BIF_IsTypeish)
 	_f_return_b(if_condition);
 
 type_mismatch:
-	_f_throw_type(_T("String"), *aParam[0]);
+	_f_throw_param(0, _T("String"));
 }
 
 
@@ -2434,62 +2422,77 @@ BIF_DECL(BIF_Number)
 ////////////////////
 
 
-BIF_DECL(BIF_Hotkey)
+bif_impl FResult BIF_Hotkey(StrArg aName, ExprTokenType *aAction, optl<StrArg> aOptions)
 {
-	_f_param_string_opt(aParam0, 0);
-	_f_param_string_opt(aParam1, 1);
-	_f_param_string_opt(aParam2, 2);
-	
 	ResultType result = OK;
 	IObject *functor = nullptr;
-
-	switch (_f_callee_id) 
+	HookActionType hook_action = 0;
+	if (aAction)
 	{
-	case FID_Hotkey:
-	{
-		HookActionType hook_action = 0;
-		if (!ParamIndexIsOmitted(1))
+		auto action_string = TokenToString(*aAction);
+		if (  !(functor = TokenToObject(*aAction)) && *action_string
+			&& !(hook_action = Hotkey::ConvertAltTab(action_string, true))  )
 		{
-			if (  !(functor = ParamIndexToObject(1)) && *aParam1
-				&& !(hook_action = Hotkey::ConvertAltTab(aParam1, true))  )
+			// Search for a match in the hotkey variants' "original callbacks".
+			// I.e., find the function implicitly defined by "x::action".
+			for (int i = 0; i < Hotkey::sHotkeyCount; ++i)
 			{
-				// Search for a match in the hotkey variants' "original callbacks".
-				// I.e., find the function implicitly defined by "x::action".
-				for (int i = 0; i < Hotkey::sHotkeyCount; ++i)
-				{
-					if (_tcscmp(Hotkey::shk[i]->mName, aParam1))
-						continue;
-					
-					for (HotkeyVariant* v = Hotkey::shk[i]->mFirstVariant; v; v = v->mNextVariant)
-						if (v->mHotCriterion == g->HotCriterion)
-						{
-							functor = v->mOriginalCallback.ToFunc();
-							goto break_twice;
-						}
-				}
-			break_twice:;
-				if (!functor)
-					_f_throw_param(1);
+				if (_tcscmp(Hotkey::shk[i]->mName, action_string))
+					continue;
+				
+				for (HotkeyVariant* v = Hotkey::shk[i]->mFirstVariant; v; v = v->mNextVariant)
+					if (v->mHotCriterion == g->HotCriterion)
+					{
+						functor = v->mOriginalCallback.ToObject();
+						goto break_twice;
+					}
 			}
+		break_twice:;
 			if (!functor)
-				hook_action = Hotkey::ConvertAltTab(aParam1, true);
+				return FR_E_ARG(1);
 		}
-		result = Hotkey::Dynamic(aParam0, aParam2, functor, hook_action, aResultToken);
-		break;
+		if (!functor)
+			hook_action = Hotkey::ConvertAltTab(action_string, true);
 	}
-	case FID_HotIf:
-		functor = ParamIndexToOptionalObject(0);
-		result = Hotkey::IfExpr(aParam0, functor, aResultToken);
-		break;
-	
-	default: // HotIfWinXXX
-		result = SetHotkeyCriterion(_f_callee_id, aParam0, aParam1); // Currently, it only fails upon out-of-memory.
-	
+	return Hotkey::Dynamic(aName, aOptions.value_or_empty(), functor, hook_action);
+}
+
+
+
+bif_impl FResult HotIf(ExprTokenType *aCriterion)
+{
+	TCHAR buf[MAX_NUMBER_SIZE];
+	if (!aCriterion)
+	{
+		g->HotCriterion = nullptr;
+		return OK;
 	}
-	
-	if (!result)
-		_f_return_FAIL;
-	_f_return_empty;
+	else if (auto obj = TokenToObject(*aCriterion))
+		return Hotkey::IfExpr(obj);
+	else
+		return Hotkey::IfExpr(TokenToString(*aCriterion, buf));
+}
+
+
+
+bif_impl FResult HotIfWinActive(optl<StrArg> aWinTitle, optl<StrArg> aWinText)
+{
+	return SetHotkeyCriterion(HOT_IF_ACTIVE, aWinTitle.value_or_empty(), aWinText.value_or_empty());
+}
+
+bif_impl FResult HotIfWinNotActive(optl<StrArg> aWinTitle, optl<StrArg> aWinText)
+{
+	return SetHotkeyCriterion(HOT_IF_NOT_ACTIVE, aWinTitle.value_or_empty(), aWinText.value_or_empty());
+}
+
+bif_impl FResult HotIfWinExist(optl<StrArg> aWinTitle, optl<StrArg> aWinText)
+{
+	return SetHotkeyCriterion(HOT_IF_EXIST, aWinTitle.value_or_empty(), aWinText.value_or_empty());
+}
+
+bif_impl FResult HotIfWinNotExist(optl<StrArg> aWinTitle, optl<StrArg> aWinText)
+{
+	return SetHotkeyCriterion(HOT_IF_NOT_EXIST, aWinTitle.value_or_empty(), aWinText.value_or_empty());
 }
 
 
@@ -2559,7 +2562,7 @@ bif_impl void Critical(optl<StrArg> aSetting, int &aRetVal)
 	// DON'T GO TOO HIGH because this setting reduces response time for ALL messages, even those that
 	// don't launch script threads (especially painting/drawing and other screen-update events).
 	// Some hardware has a tickcount granularity of 15 instead of 10, so this covers more variations.
-	DWORD peek_frequency_when_critical_is_on = 16; // Set default.  See below.
+	DWORD peek_frequency_when_critical_is_on = UNINTERRUPTIBLE_PEEK_FREQUENCY; // Set default.  See below.
 	// v1.0.48: Below supports "Critical 0" as meaning "Off" to improve compatibility with A_IsCritical.
 	// In fact, for performance, only the following are no recognized as turning on Critical:
 	//     - "On"
@@ -3239,7 +3242,8 @@ BOOL TokenToBOOL(ExprTokenType &aToken)
 	case SYM_FLOAT:
 		return aToken.value_double != 0.0;
 	case SYM_STRING:
-		return ResultToBOOL(aToken.marker);
+		return ResultToBOOL(aToken.marker)
+			|| aToken.marker_length && !*aToken.marker; // Consider any non-empty string beginning with \0 to be TRUE.
 	default:
 		// The only remaining valid symbol is SYM_OBJECT, which is always TRUE.
 		// Check symbol anyway, in case SYM_MISSING or something else sneaks in.
@@ -3272,10 +3276,10 @@ SymbolType TokenIsNumeric(ExprTokenType &aToken)
 		return aToken.symbol;
 	case SYM_VAR: 
 		return aToken.var->IsNumeric();
-	case SYM_MISSING:
-		return PURE_NOT_NUMERIC;
-	default: // SYM_STRING: Callers of this function expect a "numeric" result for numeric strings.
+	case SYM_STRING: // Callers of this function expect a "numeric" result for numeric strings.
 		return IsNumeric(aToken.marker, true, false, true);
+	default: // SYM_MISSING or SYM_OBJECT
+		return PURE_NOT_NUMERIC;
 	}
 }
 
@@ -3421,6 +3425,50 @@ LPTSTR TokenToString(ExprTokenType &aToken, LPTSTR aBuf, size_t *aLength)
 	if (aLength) // Caller wants to know the string's length as well.
 		*aLength = _tcslen(result);
 	return result;
+}
+
+
+
+ResultType TokenToStringParam(ResultToken &aResultToken, ExprTokenType *aParam[], int aIndex, LPTSTR aBuf, LPTSTR &aString, size_t *aLength, bool aPermitObject)
+{
+	ExprTokenType &token = *aParam[aIndex];
+	LPTSTR result = nullptr;
+	switch (token.symbol)
+	{
+	case SYM_VAR:
+		if (!aPermitObject && token.var->HasObject())
+			break;
+		aString = token.var->Contents(); // Contents() vs. mCharContents in case mCharContents needs to be updated by Contents().
+		if (aLength)
+			*aLength = token.var->Length();
+		return OK;
+	case SYM_STRING:
+		aString = token.marker;
+		if (aLength)
+			*aLength = token.marker_length != -1 ? token.marker_length : _tcslen(token.marker);
+		return OK;
+	case SYM_INTEGER:
+		aString = ITOA64(token.value_int64, aBuf);
+		if (aLength)
+			*aLength = _tcslen(aBuf);
+		return OK;
+	case SYM_OBJECT:
+		if (aPermitObject)
+		{
+			aString = _T("");
+			if (aLength)
+				*aLength = 0;
+			return OK;
+		}
+		break;
+	case SYM_FLOAT:
+		int length = FTOA(token.value_double, aString = aBuf, MAX_NUMBER_SIZE);
+		if (aLength)
+			*aLength = length;
+		return OK;
+	//case SYM_MISSING: // Caller should handle this case
+	}
+	return aResultToken.ParamError(aIndex, aParam[aIndex], _T("String"));
 }
 
 
@@ -3639,6 +3687,23 @@ ResultType ResultToken::Return(LPTSTR aValue, size_t aLength)
 
 
 
+bool ColorToBGR(ExprTokenType &aColorNameOrRGB, COLORREF &aBGR)
+{
+	switch (TypeOfToken(aColorNameOrRGB))
+	{
+	case SYM_INTEGER:
+		aBGR = rgb_to_bgr((COLORREF)TokenToInt64(aColorNameOrRGB));
+		return true;
+	case SYM_STRING:
+		return ColorToBGR(TokenToString(aColorNameOrRGB), aBGR);
+	default:
+		aBGR = 0;
+		return false;
+	}
+}
+
+
+
 int ConvertJoy(LPCTSTR aBuf, int *aJoystickID, bool aAllowOnlyButtons)
 // The caller TextToKey() currently relies on the fact that when aAllowOnlyButtons==true, a value
 // that can fit in a sc_type (USHORT) is returned, which is true since the joystick buttons
@@ -3660,9 +3725,9 @@ int ConvertJoy(LPCTSTR aBuf, int *aJoystickID, bool aAllowOnlyButtons)
 
 	if (!_tcsnicmp(aBuf, _T("Joy"), 3))
 	{
-		if (IsNumeric(aBuf + 3, false, false))
+		int offset;
+		if (ParseInteger(aBuf + 3, offset))
 		{
-			int offset = ATOI(aBuf + 3);
 			if (offset < 1 || offset > MAX_JOY_BUTTONS)
 				return JOYCTRL_INVALID;
 			return JOYCTRL_1 + offset - 1;

@@ -123,10 +123,8 @@ ResultType Script::ThrowRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo
 		token->symbol = SYM_OBJECT;
 		token->mem_to_free = NULL;
 
-		g->ThrownToken = token;
+		return aLine->SetThrownToken(*g, token, aErrorType);
 	}
-	if (!(g->ExcptMode & EXCPTMODE_CATCH))
-		return UnhandledException(aLine, aErrorType);
 
 	// Returning FAIL causes each caller to also return FAIL, until either the
 	// thread has fully exited or the recursion layer handling ACT_TRY is reached:
@@ -136,6 +134,24 @@ ResultType Script::ThrowRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo
 ResultType Script::ThrowRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo)
 {
 	return ThrowRuntimeException(aErrorText, aExtraInfo, mCurrLine, FAIL);
+}
+
+
+ResultType Line::SetThrownToken(global_struct &g, ResultToken *aToken, ResultType aErrorType)
+{
+#ifdef CONFIG_DEBUGGER
+	if (g_Debugger.IsConnected())
+		if (g_Debugger.PreThrow(aToken) && !(g.ExcptMode & EXCPTMODE_CATCH))
+			// The debugger has entered (and left) a break state, so the client has had a
+			// chance to inspect the exception and report it.  There's nothing in the DBGp
+			// spec about what to do next, probably since PHP would just log the error.
+			// In our case, it seems more useful to suppress the dialog than to show it.
+			return FAIL;
+#endif
+	g.ThrownToken = aToken;
+	if (!(g.ExcptMode & EXCPTMODE_CATCH))
+		return g_script.UnhandledException(this, aErrorType); // Usually returns FAIL; may return OK if aErrorType == FAIL_OR_OK.
+	return FAIL;
 }
 
 
@@ -201,7 +217,12 @@ ResultType Line::LineError(LPCTSTR aErrorText, ResultType aErrorType, LPCTSTR aE
 	{
 		return g_script.RuntimeError(aErrorText, aExtraInfo, aErrorType, this);
 	}
-
+	
+#ifdef CONFIG_DLL
+	if (LibNotifyProblem(aErrorText, aExtraInfo, this))
+		return aErrorType;
+#endif
+	
 	if (g_script.mErrorStdOut && aErrorType != WARN)
 	{
 		// JdeB said:
@@ -227,10 +248,19 @@ ResultType Script::RuntimeError(LPCTSTR aErrorText, LPCTSTR aExtraInfo, ResultTy
 	ASSERT(aErrorText);
 	if (!aExtraInfo)
 		aExtraInfo = _T("");
-	
-	if ((g->ExcptMode || mOnError.Count() || aPrototype && aPrototype->HasOwnProps()) && aErrorType != WARN)
-		return ThrowRuntimeException(aErrorText, aExtraInfo, aLine, aErrorType, aPrototype);
 
+	if ((g->ExcptMode || mOnError.Count()
+#ifdef CONFIG_DEBUGGER
+		|| g_Debugger.BreakOnExceptionIsEnabled()
+#endif
+		|| aPrototype) && aErrorType != WARN)
+		return ThrowRuntimeException(aErrorText, aExtraInfo, aLine, aErrorType, aPrototype);
+	
+#ifdef CONFIG_DLL
+	if (LibNotifyProblem(aErrorText, aExtraInfo, aLine))
+		return aErrorType;
+#endif
+	
 	return ShowError(aErrorText, aErrorType, aExtraInfo, aLine);
 }
 
@@ -535,6 +565,8 @@ INT_PTR CALLBACK ErrorBoxProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			{
 				// Call the handler directly since g_hWnd might be NULL if this is a warning dialog.
 				HandleMenuItem(NULL, LOWORD(wParam), NULL);
+				if (LOWORD(wParam) == ID_FILE_RELOADSCRIPT)
+					EndDialog(hwnd, IDCANCEL);
 				return TRUE;
 			}
 		}
@@ -655,19 +687,13 @@ ResultType Script::ShowError(LPCTSTR aErrorText, ResultType aErrorType, LPCTSTR 
 
 
 
-ResultType Script::ScriptError(LPCTSTR aErrorText, LPCTSTR aExtraInfo) //, ResultType aErrorType)
+ResultType Script::ScriptError(LPCTSTR aErrorText, LPCTSTR aExtraInfo)
 // Even though this is a Script method, including it here since it shares
 // a common theme with the other error-displaying functions:
 {
-	if (mCurrLine)
-		// If a line is available, do LineError instead since it's more specific.
-		// If an error occurs before the script is ready to run, assume it's always critical
-		// in the sense that the program will exit rather than run the script.
-		// Update: It's okay to return FAIL in this case.  CRITICAL_ERROR should
-		// be avoided whenever OK and FAIL are sufficient by themselves, because
-		// otherwise, callers can't use the NOT operator to detect if a function
-		// failed (since FAIL is value zero, but CRITICAL_ERROR is non-zero):
-		return mCurrLine->LineError(aErrorText, FAIL, aExtraInfo);
+	if (mCurrLine && g_script.mIsReadyToExecute)
+		// If a line is available, do RuntimeError instead for exceptions and line context.
+		return RuntimeError(aErrorText, aExtraInfo, FAIL, mCurrLine);
 	// Otherwise: The fact that mCurrLine is NULL means that the line currently being loaded
 	// has not yet been successfully added to the linked list.  Such errors will always result
 	// in the program exiting.
@@ -675,7 +701,12 @@ ResultType Script::ScriptError(LPCTSTR aErrorText, LPCTSTR aExtraInfo) //, Resul
 		aErrorText = _T("Unk"); // Placeholder since it shouldn't be NULL.
 	if (!aExtraInfo) // In case the caller explicitly called it with NULL.
 		aExtraInfo = _T("");
-
+	
+#ifdef CONFIG_DLL
+	if (LibNotifyProblem(aErrorText, aExtraInfo, nullptr))
+		return FAIL;
+#endif
+	
 	if (g_script.mErrorStdOut && !g_script.mIsReadyToExecute) // i.e. runtime errors are always displayed via dialog.
 	{
 		// See LineError() for details.
@@ -789,6 +820,13 @@ ResultType ResultToken::Error(LPCTSTR aErrorText, LPCTSTR aExtraInfo, Object *aP
 	//ASSERT(!mem_to_free); // At least one caller frees it after calling this function.
 	ASSERT(symbol != SYM_OBJECT);
 	return Fail(g_script.RuntimeError(aErrorText, aExtraInfo, FAIL_OR_OK, nullptr, aPrototype));
+}
+
+__declspec(noinline)
+ResultType ResultToken::Error(LPCTSTR aErrorText, ExprTokenType &aExtraInfo, Object *aPrototype)
+{
+	TCHAR buf[MAX_NUMBER_SIZE];
+	return Error(aErrorText, TokenToString(aExtraInfo, buf), aPrototype);
 }
 
 __declspec(noinline)
@@ -965,7 +1003,7 @@ FResult FParamError(int aIndex, ExprTokenType *aParam, LPCTSTR aExpectedType)
 
 
 
-ResultType FResultToError(ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount, FResult aResult)
+ResultType FResultToError(ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount, FResult aResult, int aFirstParam)
 {
 	if (aResult & FR_OUR_FLAG)
 	{
@@ -982,7 +1020,9 @@ ResultType FResultToError(ResultToken &aResultToken, ExprTokenType *aParam[], in
 			ASSERT(!code);
 			return aResultToken.SetExitResult(FAIL);
 		case FR_FACILITY_ARG:
-			return aResultToken.ParamError(code, code < aParamCount ? aParam[code] : nullptr);
+			if (aResult == FR_E_ARGS)
+				return aResultToken.Error(ERR_PARAM_INVALID);
+			return aResultToken.ParamError(code, code + aFirstParam < aParamCount ? aParam[code + aFirstParam] : nullptr);
 		case FACILITY_WIN32:
 			if (!code)
 				code = GetLastError();
@@ -1120,6 +1160,14 @@ ResultType Script::UnhandledException(Line* aLine, ResultType aErrorType)
 			return FAIL; // Exit thread.
 		}
 	}
+	
+#ifdef CONFIG_DLL
+	if (LibNotifyProblem(*token))
+	{
+		g.ThrownToken = token; // See comments above.
+		return FAIL;
+	}
+#endif
 
 	if (Object *ex = dynamic_cast<Object *>(TokenToObject(*token)))
 	{
@@ -1188,12 +1236,17 @@ bool Line::CatchThis(ExprTokenType &aThrown) // ACT_CATCH
 
 void Script::ScriptWarning(WarnMode warnMode, LPCTSTR aWarningText, LPCTSTR aExtraInfo, Line *line)
 {
-	if (warnMode == WARNMODE_OFF)
-		return;
-
 	if (!line) line = mCurrLine;
 	int fileIndex = line ? line->mFileIndex : mCurrFileIndex;
 	FileIndexType lineNumber = line ? line->mLineNumber : mCombinedLineNumber;
+	
+#ifdef CONFIG_DLL
+	if (LibNotifyProblem(aWarningText, aExtraInfo, line, true))
+		return;
+#endif
+	
+	if (warnMode == WARNMODE_OFF)
+		return;
 
 	TCHAR buf[MSGBOX_TEXT_SIZE];
 	auto n = FormatStdErr(buf, _countof(buf), aWarningText, aExtraInfo, fileIndex, lineNumber, true);

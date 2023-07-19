@@ -158,13 +158,7 @@ enum CommandIDs {CONTROL_ID_FIRST = IDCANCEL + 1
 #define ERR_PARAM1_REQUIRED _T("Parameter #1 required")
 #define ERR_PARAM2_REQUIRED _T("Parameter #2 required")
 #define ERR_PARAM3_REQUIRED _T("Parameter #3 required")
-#define ERR_PARAM2_MUST_BE_BLANK _T("Parameter #2 must be blank in this case.")
-#define ERR_PARAM3_MUST_BE_BLANK _T("Parameter #3 must be blank in this case.")
-#define ERR_PARAM4_MUST_BE_BLANK _T("Parameter #4 must be blank in this case.")
 #define ERR_PARAM1_MUST_NOT_BE_BLANK _T("Parameter #1 must not be blank in this case.")
-#define ERR_PARAM2_MUST_NOT_BE_BLANK _T("Parameter #2 must not be blank in this case.")
-#define ERR_PARAM3_MUST_NOT_BE_BLANK _T("Parameter #3 must not be blank in this case.")
-#define ERR_PARAM4_MUST_NOT_BE_BLANK _T("Parameter #4 must not be blank in this case.")
 #define ERR_MISSING_OUTPUT_VAR _T("Requires at least one of its output variables.")
 #define ERR_MISSING_OPEN_PAREN _T("Missing \"(\"")
 #define ERR_MISSING_OPEN_BRACE _T("Missing \"{\"")
@@ -202,7 +196,7 @@ enum CommandIDs {CONTROL_ID_FIRST = IDCANCEL + 1
 #define ERR_TOO_MANY_REFS ERR_EXPR_TOO_LONG // No longer applies to just var/func refs. Old message: "Too many var/func refs."
 #define ERR_NO_LABEL _T("Label not found in current scope.")
 #define ERR_INVALID_MENU_TYPE _T("Invalid menu type.")
-#define ERR_INVALID_SUBMENU _T("Invalid submenu.")
+#define ERR_INVALID_MENU_ITEM _T("Nonexistent menu item.")
 #define ERR_WINDOW_PARAM _T("Requires at least one of its window parameters.")
 #define ERR_MOUSE_COORD _T("X & Y must be either both absent or both present.")
 #define ERR_DIVIDEBYZERO _T("Divide by zero.")
@@ -267,7 +261,7 @@ enum CommandIDs {CONTROL_ID_FIRST = IDCANCEL + 1
 
 void DoIncrementalMouseMove(int aX1, int aY1, int aX2, int aY2, int aSpeed);
 
-DWORD ProcessExist(LPCTSTR aProcess);
+DWORD ProcessExist(LPCTSTR aProcess, bool aGetParent = false);
 DWORD GetProcessName(DWORD aProcessID, LPTSTR aBuf, DWORD aBufSize, bool aGetNameOnly);
 
 FResult Shutdown(int nFlag);
@@ -325,7 +319,6 @@ static inline int DPIUnscale(int x)
 
 #define INPUTBOX_DEFAULT INT_MIN
 ResultType InputBoxParseOptions(LPCTSTR aOptions, InputBoxType &aInputBox);
-ResultType InputBox(Var *aOutputVar, LPTSTR aText, LPTSTR aTitle, LPTSTR aOptions, LPTSTR aDefault);
 INT_PTR CALLBACK InputBoxProc(HWND hWndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 VOID CALLBACK InputBoxTimeout(HWND hWnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
 VOID CALLBACK DerefTimeout(HWND hWnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
@@ -338,6 +331,8 @@ bool HandleMenuItem(HWND aHwnd, WORD aMenuItemID, HWND aGuiHwnd);
 INT_PTR CALLBACK TabDialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 #define TABDIALOG_ATTRIB_INDEX(a) (TabControlIndexType)(a & 0xFF)
 #define TABDIALOG_ATTRIB_THEMED 0x100
+
+FResult ControlGetClassNN(HWND aWindow, HWND aControl, LPTSTR aBuf, int aBufSize);
 
 
 typedef UINT LineNumberType;
@@ -1032,32 +1027,6 @@ public:
 			return -1;
 	}
 
-	static DWORD SoundConvertControlType(LPTSTR aBuf)
-	{
-		// v1.0.37.06: The following was added to allow unnamed control types (if any) to be accessed via number:
-		if (IsNumeric(aBuf, false, false, true)) // Seems best to allowing floating point here, since .000 on the end might happen sometimes.
-			return ATOU(aBuf);
-		// The following are the types that seem to correspond to actual sound attributes.  Some of the
-		// values are not included here, such as MIXERCONTROL_CONTROLTYPE_FADER, which seems to be a type
-		// of sound control rather than a quality of the sound itself.  For performance, put the most
-		// often used ones up top.
-		if (!_tcsicmp(aBuf, _T("Vol"))
-			|| !_tcsicmp(aBuf, _T("Volume"))) return MIXERCONTROL_CONTROLTYPE_VOLUME;
-		if (!_tcsicmp(aBuf, _T("OnOff")))     return MIXERCONTROL_CONTROLTYPE_ONOFF;
-		if (!_tcsicmp(aBuf, _T("Mute")))      return MIXERCONTROL_CONTROLTYPE_MUTE;
-		if (!_tcsicmp(aBuf, _T("Mono")))      return MIXERCONTROL_CONTROLTYPE_MONO;
-		if (!_tcsicmp(aBuf, _T("Loudness")))  return MIXERCONTROL_CONTROLTYPE_LOUDNESS;
-		if (!_tcsicmp(aBuf, _T("StereoEnh"))) return MIXERCONTROL_CONTROLTYPE_STEREOENH;
-		if (!_tcsicmp(aBuf, _T("BassBoost"))) return MIXERCONTROL_CONTROLTYPE_BASS_BOOST;
-		if (!_tcsicmp(aBuf, _T("Pan")))       return MIXERCONTROL_CONTROLTYPE_PAN;
-		if (!_tcsicmp(aBuf, _T("QSoundPan"))) return MIXERCONTROL_CONTROLTYPE_QSOUNDPAN;
-		if (!_tcsicmp(aBuf, _T("Bass")))      return MIXERCONTROL_CONTROLTYPE_BASS;
-		if (!_tcsicmp(aBuf, _T("Treble")))    return MIXERCONTROL_CONTROLTYPE_TREBLE;
-		if (!_tcsicmp(aBuf, _T("Equalizer"))) return MIXERCONTROL_CONTROLTYPE_EQUALIZER;
-		#define MIXERCONTROL_CONTROLTYPE_INVALID 0xFFFFFFFF // 0 might be a valid type, so use something definitely undefined.
-		return MIXERCONTROL_CONTROLTYPE_INVALID;
-	}
-
 	static TitleMatchModes ConvertTitleMatchMode(LPCTSTR aBuf)
 	{
 		if (!aBuf || !*aBuf) return MATCHMODE_INVALID;
@@ -1260,10 +1229,10 @@ public:
 		if (!_tcsicmp(aBuf, _T("UTF-16-RAW")))	return 1200 | CP_AHKNOBOM;
 		if (!_tcsnicmp(aBuf, _T("CP"), 2))
 			aBuf += 2;
-		if (IsNumeric(aBuf, false, false))
+		UINT cp;
+		if (ParseInteger(aBuf, cp))
 		{
 			// CPnnn
-			UINT cp = ATOU(aBuf);
 			// Catch invalid or (not installed) code pages early rather than
 			// failing conversion later on.
 			if (IsValidFileCodePage(cp))
@@ -1274,14 +1243,6 @@ public:
 
 	static UINT ConvertFileEncoding(ExprTokenType &aToken);
 
-	static ResultType ValidateMouseCoords(LPTSTR aX, LPTSTR aY)
-	{
-		// OK: Both are absent, which is the signal to use the current position.
-		// OK: Both are present (that they are numeric is validated elsewhere).
-		// FAIL: One is absent but the other is present.
-		return (!*aX && !*aY) || (*aX && *aY) ? OK : FAIL;
-	}
-
 	static LPTSTR LogToText(LPTSTR aBuf, int aBufSize);
 	LPTSTR ToText(LPTSTR aBuf, int aBufSize, bool aCRLF, DWORD aElapsed = 0, bool aLineWasResumed = false, bool aLineNumber = true);
 
@@ -1290,7 +1251,8 @@ public:
 	ResultType LineError(LPCTSTR aErrorText, ResultType aErrorType = FAIL, LPCTSTR aExtraInfo = _T(""));
 	IObject *CreateRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo, Object *aPrototype);
 	ResultType ThrowRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo = _T(""));
-	
+	ResultType SetThrownToken(global_struct &g, ResultToken *aToken, ResultType aErrorType = FAIL);
+
 	ResultType ValidateVarUsage(Var *aVar, int aUsage);
 	ResultType VarIsReadOnlyError(Var *aVar, int aErrorType);
 	ResultType LineUnexpectedError();
@@ -1315,7 +1277,6 @@ public:
 	static int Util_CopyFile(LPCTSTR szInputSource, LPCTSTR szInputDest, bool bOverwrite, bool bMove, DWORD &aLastError);
 	static void Util_ExpandFilenameWildcard(LPCTSTR szSource, LPCTSTR szDest, LPTSTR szExpandedDest);
 	static void Util_ExpandFilenameWildcardPart(LPCTSTR szSource, LPCTSTR szDest, LPTSTR szExpandedDest);
-	static bool Util_DoesFileExist(LPCTSTR szFilename);
 	static bool Util_IsDir(LPCTSTR szPath);
 	static void Util_GetFullPathName(LPCTSTR szIn, LPTSTR szOut);
 	static void Util_GetFullPathName(LPCTSTR szIn, LPTSTR szOut, DWORD aBufSize);
@@ -1329,6 +1290,10 @@ public:
 	LPTSTR mName;
 	Line *mJumpToLine;
 	Label *mPrevLabel, *mNextLabel;  // Prev & Next items in linked list.
+#ifdef CONFIG_DLL
+	LineNumberType mLineNumber;
+	FileIndexType mFileIndex;
+#endif
 
 	Label(LPTSTR aLabelName)
 		: mName(aLabelName) // Caller gave us a pointer to dynamic memory for this.
@@ -1344,9 +1309,8 @@ public:
 
 
 // This class encapsulates a pointer to an object which can be called by a timer,
-// hotkey, etc.  It provides common functionality that wouldn't be suitable for the
-// base IObject interface, but is needed for detection of "Suspend" or "Critical"
-// prior to calling the sub or function.
+// hotkey, etc.  It was originally added to support functions/objects in addition
+// to labels, but label support was removed.
 class IObjectPtr
 {
 protected:
@@ -1356,7 +1320,7 @@ public:
 	IObjectPtr() : mObject(NULL) {}
 	IObjectPtr(IObject *object) : mObject(object) {}
 	ResultType ExecuteInNewThread(TCHAR *aNewThreadDesc
-		, ExprTokenType *aParamValue = NULL, int aParamCount = 0, __int64 *aRetVal = NULL) const;
+		, ExprTokenType *aParamValue = NULL, int aParamCount = 0, bool aReturnBoolean = false) const;
 	const IObjectPtr* operator-> () { return this; } // Act like a pointer.
 	operator void *() const { return mObject; } // For comparisons and boolean eval.
 
@@ -1374,8 +1338,7 @@ public:
 class IObjectRef : public IObjectPtr
 {
 private:
-	IObjectRef(const IObjectRef &); // Disable default copy constructor.
-	IObjectRef & operator = (const IObjectRef &); // ...and copy assignment.
+	IObjectRef & operator = (const IObjectRef &) = delete; // Disable default copy assignment.
 
 public:
 	IObjectRef() : IObjectPtr() {}
@@ -1534,9 +1497,14 @@ public:
 	int mMinParams = 0;  // The number of mandatory parameters (populated for both UDFs and built-in's).
 	bool mIsVariadic = false; // Whether to allow mParamCount to be exceeded.
 
+#ifdef CONFIG_DLL
+	LineNumberType mLineNumber = 0;
+	FileIndexType mFileIndex = 0;
+#endif
+
 	virtual bool IsBuiltIn() = 0; // FIXME: Should not need to rely on this.
 	virtual bool ArgIsOutputVar(int aArg) = 0;
-	virtual bool ArgIsOptional(int aArg) { return aArg > mMinParams; }
+	virtual bool ArgIsOptional(int aArg) { return aArg >= mMinParams; }
 
 	// bool result indicates whether aResultToken contains a value (i.e. false for FAIL/EARLY_EXIT).
 	virtual bool Call(ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount);
@@ -1746,7 +1714,7 @@ public:
 	static BoundFunc *Bind(IObject *aFunc, int aFlags, LPCTSTR aMember, ExprTokenType **aParam, int aParamCount);
 	~BoundFunc();
 	
-	bool IsBuiltIn() override { return true; }
+	bool IsBuiltIn() override { return false; }
 	bool ArgIsOutputVar(int aArg) override { return false; }
 	bool Call(ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount) override;
 };
@@ -2022,7 +1990,7 @@ struct MsgMonitorInstance
 
 
 
-#define MAX_MENU_NAME_LENGTH MAX_PATH // For both menu and menu item names.
+#define MAX_MENU_NAME_LENGTH MAX_PATH // The observed limit for Win32 menu item text.
 class UserMenuItem;  // Forward declaration since classes use each other (i.e. a menu *item* can have a submenu).
 class UserMenu : public Object
 {
@@ -2040,7 +2008,7 @@ public:
 	HBRUSH mBrush = NULL; // Background color to apply to menu.
 	COLORREF mColor = CLR_DEFAULT; // The color that corresponds to the above.
 
-	static ObjectMember sMembers[];
+	static ObjectMemberMd sMembers[];
 	static int sMemberCount;
 	static Object *sPrototype, *sBarPrototype;
 
@@ -2051,65 +2019,55 @@ public:
 	static UserMenu *Create() { return new UserMenu(MENU_TYPE_POPUP); }
 	void Dispose();
 	~UserMenu();
-
-	enum MemberID
-	{
-		INVALID = 0,
-
-		// Methods
-		M_Add,
-		M_AddStandard,
-		M_Insert,
-		M_Delete,
-		M_Rename,
-		M_Check,
-		M_Uncheck,
-		M_ToggleCheck,
-		M_Enable,
-		M_Disable,
-		M_ToggleEnable,
-		M_SetIcon,
-		M_Show,
-		M_SetColor,
-		LastMethodPlusOne,
-
-		// Properties
-		P_Default,
-		P_Handle,
-		P_ClickCount,
-	};
 	
-	void Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount);
+	FResult Add(optl<StrArg> aName, optl<IObject*> aFuncOrSubmenu, optl<StrArg> aOptions);
+	FResult Add(optl<StrArg> aName, optl<IObject*> aFuncOrSubmenu, optl<StrArg> aOptions, UserMenuItem **insert_at);
+	FResult AddStandard();
+	FResult Check(StrArg aItemName);
+	FResult Delete(optl<StrArg> aItemName);
+	FResult Disable(StrArg aItemName);
+	FResult Enable(StrArg aItemName);
+	FResult Insert(optl<StrArg> aBefore, optl<StrArg> aName, optl<IObject*> aFuncOrSubmenu, optl<StrArg> aOptions);
+	FResult Rename(StrArg aItemName, optl<StrArg> aNewName);
+	FResult SetColor(ExprTokenType *aColor, optl<BOOL> aApplyToSubmenus);
+	FResult SetIcon(StrArg aItemName, StrArg aIconFile, optl<int> aIconNumber, optl<int> aIconWidth);
+	FResult Show(optl<int> aX, optl<int> aY);
+	FResult ToggleCheck(StrArg aItemName);
+	FResult ToggleEnable(StrArg aItemName);
+	FResult Uncheck(StrArg aItemName);
+	
+	FResult get_ClickCount(int &aRetVal);
+	FResult set_ClickCount(int aValue);
+	FResult get_Default(StrRet &aRetVal);
+	FResult set_Default(StrArg aItemName);
+	FResult get_Handle(UINT_PTR &aRetVal);
 
-	ResultType AddItem(LPTSTR aName, UINT aMenuID, IObject *aCallback, UserMenu *aSubmenu, LPTSTR aOptions, UserMenuItem **aInsertAt);
+	ResultType AddItem(LPCTSTR aName, UINT aMenuID, IObject *aCallback, UserMenu *aSubmenu, LPCTSTR aOptions, UserMenuItem **aInsertAt = nullptr);
 	ResultType InternalAppendMenu(UserMenuItem *aMenuItem, UserMenuItem *aInsertBefore = NULL);
 	void DeleteItem(UserMenuItem *aMenuItem, UserMenuItem *aMenuItemPrev, bool aUpdateGuiMenuBars = true);
 	void DeleteAllItems();
-	ResultType ModifyItem(UserMenuItem *aMenuItem, IObject *aCallback, UserMenu *aSubmenu, LPTSTR aOptions);
-	ResultType UpdateOptions(UserMenuItem *aMenuItem, LPTSTR aOptions);
-	ResultType RenameItem(UserMenuItem *aMenuItem, LPTSTR aNewName);
-	ResultType UpdateName(UserMenuItem *aMenuItem, LPTSTR aNewName);
+	ResultType ModifyItem(UserMenuItem *aMenuItem, IObject *aCallback, UserMenu *aSubmenu, LPCTSTR aOptions);
+	ResultType UpdateOptions(UserMenuItem *aMenuItem, LPCTSTR aOptions);
+	ResultType RenameItem(UserMenuItem *aMenuItem, LPCTSTR aNewName);
+	ResultType UpdateName(UserMenuItem *aMenuItem, LPCTSTR aNewName);
 	void SetItemState(UserMenuItem *aMenuItem, UINT aState, UINT aStateMask);
-	void CheckItem(UserMenuItem *aMenuItem);
-	void UncheckItem(UserMenuItem *aMenuItem);
-	void ToggleCheckItem(UserMenuItem *aMenuItem);
-	void EnableItem(UserMenuItem *aMenuItem);
-	void DisableItem(UserMenuItem *aMenuItem);
-	void ToggleEnableItem(UserMenuItem *aMenuItem);
+	FResult SetItemState(StrArg aItemName, UINT aState, UINT aStateMask);
 	void SetDefault(UserMenuItem *aMenuItem = NULL, bool aUpdateGuiMenuBars = true);
 	ResultType CreateHandle();
 	void DestroyHandle();
-	void SetColor(ExprTokenType &aColor, bool aApplyToSubmenus);
+	void SetColor(COLORREF aColor, bool aApplyToSubmenus);
 	void ApplyColor(bool aApplyToSubmenus);
 	ResultType AppendStandardItems();
 	ResultType EnableStandardOpenItem(bool aEnable);
 	ResultType Display(bool aForceToForeground = true, int aX = COORD_UNSPECIFIED, int aY = COORD_UNSPECIFIED);
-	UserMenuItem *FindItem(LPTSTR aNameOrPos, UserMenuItem *&aPrevItem, bool &aByPos);
+	FResult GetItem(LPCTSTR aNameOrPos, UserMenuItem *&aItem);
+	FResult ItemNotFoundError(LPCTSTR aItem);
+	UserMenuItem *FindItem(LPCTSTR aNameOrPos, UserMenuItem *&aPrevItem, bool &aByPos);
 	UserMenuItem *FindItemByID(UINT aID);
 	bool ContainsMenu(UserMenu *aMenu);
 	void UpdateAccelerators();
 	// L17: Functions for menu icons.
-	ResultType SetItemIcon(UserMenuItem *aMenuItem, LPTSTR aFilename, int aIconNumber, int aWidth);
+	ResultType SetItemIcon(UserMenuItem *aMenuItem, LPCTSTR aFilename, int aIconNumber, int aWidth);
 	void ApplyItemIcon(UserMenuItem *aMenuItem);
 	void RemoveItemIcon(UserMenuItem *aMenuItem);
 };
@@ -2231,7 +2189,7 @@ struct GuiControlType : public Object
 	GuiControlType(GuiType* owner) : gui(owner) {}
 
 	static LPTSTR sTypeNames[GUI_CONTROL_TYPE_COUNT];
-	static GuiControls ConvertTypeName(LPTSTR aTypeName);
+	static GuiControls ConvertTypeName(LPCTSTR aTypeName);
 	LPTSTR GetTypeName();
 
 	// An array of these attributes is used in place of several long switch() statements,
@@ -2323,35 +2281,7 @@ struct GuiControlType : public Object
 		return TypeHasAttrib(TYPE_USES_BGCOLOR);
 	}
 
-	enum MemberID
-	{
-		INVALID = 0,
-
-		// Methods
-		M_Opt, // a.k.a. Opt
-		M_Focus,
-		M_Move,
-		M_GetPos,
-		M_OnEvent,
-		M_OnNotify,
-		M_OnCommand,
-		M_SetFont,
-		M_Redraw,
-
-		// Properties
-		P_Hwnd,
-		P_Gui,
-		P_Name,
-		P_Type,
-		P_ClassNN,
-		P_Text,
-		P_Value,
-		P_Enabled,
-		P_Visible,
-		P_Focused,
-	};
-
-	static ObjectMember sMembers[];
+	static ObjectMemberMd sMembers[];
 	static ObjectMemberMd sMembersList[]; // Tab, ListBox, ComboBox, DDL
 	static ObjectMemberMd sMembersTab[];
 	static ObjectMemberMd sMembersDate[];
@@ -2364,8 +2294,31 @@ struct GuiControlType : public Object
 	static void DefineControlClasses();
 	static Object *GetPrototype(GuiControls aType);
 
-	void Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount);
-	ResultType Invoke(IObject_Invoke_PARAMS_DECL);
+	FResult Focus();
+	FResult GetPos(int *aX, int *aY, int *aWidth, int *aHeight);
+	FResult Move(optl<int> aX, optl<int> aY, optl<int> aWidth, optl<int> aHeight);
+	FResult OnCommand(int aNotifyCode, ExprTokenType &aCallback, optl<int> aAddRemove);
+	FResult OnEvent(StrArg aEventName, ExprTokenType &aCallback, optl<int> aAddRemove);
+	FResult OnNotify(int aNotifyCode, ExprTokenType &aCallback, optl<int> aAddRemove);
+	FResult Opt(StrArg aOptions);
+	FResult Redraw();
+	FResult SetFont(optl<StrArg> aOptions, optl<StrArg> aFontName);
+	
+	FResult get_ClassNN(StrRet &aRetVal);
+	FResult get_Enabled(BOOL &aRetVal);
+	FResult set_Enabled(BOOL aValue);
+	FResult get_Focused(BOOL &aRetVal);
+	FResult get_Gui(IObject *&aRetVal);
+	FResult get_Hwnd(UINT &aRetVal);
+	FResult get_Name(StrRet &aRetVal);
+	FResult set_Name(StrArg aValue);
+	FResult get_Text(ResultToken &aResultToken);
+	FResult set_Text(ExprTokenType &aValue);
+	FResult get_Type(StrRet &aRetVal);
+	FResult get_Value(ResultToken &aResultToken);
+	FResult set_Value(ExprTokenType &aValue);
+	FResult get_Visible(BOOL &aRetVal);
+	FResult set_Visible(BOOL aValue);
 	
 	FResult DT_SetFormat(optl<StrArg> aFormat);
 	
@@ -2521,40 +2474,77 @@ public:
 
 	// Don't overload new and delete operators in this case since we want to use real dynamic memory
 	// (since GUIs can be destroyed and recreated, over and over).
+	
+	FResult Add(StrArg aCtrlType, optl<StrArg> aOptions, ExprTokenType *aContent, IObject *&aRetVal);
+	#define ADD_METHOD(NAME, CTRLTYPE) \
+		FResult NAME(optl<StrArg> aOptions, ExprTokenType *aContent, IObject *&aRetVal) { \
+			return AddControl(aOptions, aContent, aRetVal, CTRLTYPE); \
+		}
+	ADD_METHOD(AddActiveX,		GUI_CONTROL_ACTIVEX)
+	ADD_METHOD(AddButton,		GUI_CONTROL_BUTTON)
+	ADD_METHOD(AddCheckBox,		GUI_CONTROL_CHECKBOX)
+	ADD_METHOD(AddComboBox,		GUI_CONTROL_COMBOBOX)
+	ADD_METHOD(AddCustom,		GUI_CONTROL_CUSTOM)
+	ADD_METHOD(AddDateTime,		GUI_CONTROL_DATETIME)
+	ADD_METHOD(AddDDL,			GUI_CONTROL_DROPDOWNLIST)
+	ADD_METHOD(AddDropDownList,	GUI_CONTROL_DROPDOWNLIST)
+	ADD_METHOD(AddEdit,			GUI_CONTROL_EDIT)
+	ADD_METHOD(AddGroupBox,		GUI_CONTROL_GROUPBOX)
+	ADD_METHOD(AddHotkey,		GUI_CONTROL_HOTKEY)
+	ADD_METHOD(AddLink,			GUI_CONTROL_LINK)
+	ADD_METHOD(AddListBox,		GUI_CONTROL_LISTBOX)
+	ADD_METHOD(AddListView,		GUI_CONTROL_LISTVIEW)
+	ADD_METHOD(AddMonthCal,		GUI_CONTROL_MONTHCAL)
+	ADD_METHOD(AddPic,			GUI_CONTROL_PIC)
+	ADD_METHOD(AddPicture,		GUI_CONTROL_PIC)
+	ADD_METHOD(AddProgress,		GUI_CONTROL_PROGRESS)
+	ADD_METHOD(AddRadio,		GUI_CONTROL_RADIO)
+	ADD_METHOD(AddSlider,		GUI_CONTROL_SLIDER)
+	ADD_METHOD(AddStatusBar,	GUI_CONTROL_STATUSBAR)
+	ADD_METHOD(AddTab,			GUI_CONTROL_TAB)
+	ADD_METHOD(AddTab2,			GUI_CONTROL_TAB2)
+	ADD_METHOD(AddTab3,			GUI_CONTROL_TAB3)
+	ADD_METHOD(AddText,			GUI_CONTROL_TEXT)
+	ADD_METHOD(AddTreeView,		GUI_CONTROL_TREEVIEW)
+	ADD_METHOD(AddUpDown,		GUI_CONTROL_UPDOWN)
+	#undef ADD_METHOD
+	
+	FResult __New(optl<StrArg> aOptions, optl<StrArg> aTitle, optl<IObject*> aEventObj);
+	FResult Destroy();
+	FResult Show(optl<StrArg> aOptions);
+	FResult Hide();
+	FResult Minimize();
+	FResult Maximize();
+	FResult Restore();
+	FResult Flash(optl<BOOL> aBlink);
+	
+	FResult GetPos(int *aX, int *aY, int *aWidth, int *aHeight);
+	FResult GetClientPos(int *aX, int *aY, int *aWidth, int *aHeight);
+	FResult Move(optl<int> aX, optl<int> aY, optl<int> aWidth, optl<int> aHeight);
+	
+	FResult OnEvent(StrArg aEventName, ExprTokenType &aCallback, optl<int> aAddRemove);
+	FResult Opt(StrArg aOptions);
+	FResult SetFont(optl<StrArg> aOptions, optl<StrArg> aFontName);
+	FResult Submit(optl<BOOL> aHideIt, IObject *&aRetVal);
+	FResult __Enum(optl<int> aVarCount, IObject *&aRetVal);
+	
+	FResult get_Hwnd(UINT &aRetVal);
+	FResult get_Title(StrRet &aRetVal);
+	FResult set_Title(StrArg aValue);
+	FResult get_MenuBar(ResultToken &aRetVal);
+	FResult set_MenuBar(ExprTokenType &aValue);
+	FResult get___Item(ExprTokenType &aIndex, IObject *&aRetVal);
+	FResult get_FocusedCtrl(IObject *&aRetVal);
+	FResult get_MarginX(int &aRetVal) { return get_Margin(aRetVal, mMarginX); }
+	FResult get_MarginY(int &aRetVal) { return get_Margin(aRetVal, mMarginY); }
+	FResult set_MarginX(int aValue) { mMarginX = Scale(aValue); return OK; }
+	FResult set_MarginY(int aValue) { mMarginY = Scale(aValue); return OK; }
+	FResult get_BackColor(ResultToken &aResultToken);
+	FResult set_BackColor(ExprTokenType &aValue);
+	FResult set_Name(StrArg aName);
+	FResult get_Name(StrRet &aRetVal);
 
-	enum MemberID
-	{
-		// Methods
-		M_Destroy,
-		//M_AddControl,
-		M_Show,
-		M_Hide,
-		M_Move,
-		M_GetPos,
-		M_GetClientPos,
-		M_SetFont,
-		M_Opt,
-		M_Minimize,
-		M_Maximize,
-		M_Restore,
-		M_Flash,
-		M_Submit,
-		M___Enum,
-		M_OnEvent,
-
-		// Properties
-		P_Hwnd,
-		P_Title,
-		P_Name,
-		P___Item,
-		P_FocusedCtrl,
-		P_BackColor,
-		P_MarginX,
-		P_MarginY,
-		P_MenuBar,
-	};
-
-	static ObjectMember sMembers[];
+	static ObjectMemberMd sMembers[];
 	static int sMemberCount;
 	static Object *sPrototype;
 
@@ -2597,35 +2587,35 @@ public:
 		SetBase(sPrototype);
 	}
 
-	void Destroy();
+	~GuiType()
+	{
+		// This is done here rather than in Dispose() to allow get_Name() and set_Name()
+		// to omit the mHwnd checks, which allows the Gui to be identified after Destroy()
+		// is called, and also reduces code size marginally.
+		free(mName);
+	}
+	
 	void Dispose();
 	static void DestroyIconsIfUnused(HICON ahIcon, HICON ahIconSmall); // L17: Renamed function and added parameter to also handle the window's small icon.
 	static GuiType *Create() { return new GuiType(); } // For Object::New<GuiType>().
-	void __New(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount);
-	void Invoke(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount);
-	void AddControl(ResultToken &aResultToken, int aID, int aFlags, ExprTokenType *aParam[], int aParamCount);
-	ResultType Create(LPTSTR aTitle);
-	ResultType SetName(LPTSTR aName);
-	void OnEvent(GuiControlType *aControl, UINT aEvent, UCHAR aEventKind, ExprTokenType *aParam[], int aParamCount, ResultToken &aResultToken);
-	void OnEvent(GuiControlType *aControl, UINT aEvent, UCHAR aEventKind, IObject *aFunc, LPTSTR aMethodName, int aMaxThreads, ResultToken &aResultToken);
+	FResult AddControl(optl<StrArg> aOptions, ExprTokenType *aContent, IObject *&aRetVal, GuiControls aCtrlType);
+	FResult Create(LPCTSTR aTitle);
+	FResult OnEvent(GuiControlType *aControl, UINT aEvent, UCHAR aEventKind, ExprTokenType &aCallback, optl<int> aAddRemove);
+	FResult OnEvent(GuiControlType *aControl, UINT aEvent, UCHAR aEventKind, IObject *aFunc, LPTSTR aMethodName, int aMaxThreads);
 	void ApplyEventStyles(GuiControlType *aControl, UINT aEvent, bool aAdded);
 	static LPTSTR sEventNames[];
 	static LPTSTR ConvertEvent(GuiEventType evt);
-	static GuiEventType ConvertEvent(LPTSTR evt);
-	// Currently this returns true for all events if we're using an event sink,
-	// because checking for the presence of a method in the event sink could be
-	// unreliable (but maybe placing some limitations would solve that?).
+	static GuiEventType ConvertEvent(LPCTSTR evt);
 	BOOL IsMonitoring(GuiEventType aEvent) { return mEvents.IsMonitoring(aEvent); }
 
 	ResultType GetEnumItem(UINT &aIndex, Var *, Var *, int);
 
 	static IObject* CreateDropArray(HDROP hDrop);
-	void SetMenu(ResultToken &aResultToken, ExprTokenType &aParam);
 	static void UpdateMenuBars(HMENU aMenu);
-	ResultType AddControl(GuiControls aControlType, LPTSTR aOptions, LPTSTR aText, GuiControlType*& apControl, Array *aObj = NULL);
-	void MethodGetPos(ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount, RECT &aPos);
+	ResultType AddControl(GuiControls aControlType, LPCTSTR aOptions, LPCTSTR aText, GuiControlType*& apControl, Array *aObj = NULL);
+	void MethodGetPos(int *aX, int *aY, int *aWidth, int *aHeight, RECT &aRect, HWND aOrigin);
 
-	ResultType ParseOptions(LPTSTR aOptions, bool &aSetLastFoundWindow, ToggleValueType &aOwnDialogs);
+	ResultType ParseOptions(LPCTSTR aOptions, bool &aSetLastFoundWindow, ToggleValueType &aOwnDialogs);
 	void SetOwnDialogs(ToggleValueType state)
 	{
 		if (state == TOGGLE_INVALID)
@@ -2634,24 +2624,23 @@ public:
 	}
 	void GetNonClientArea(LONG &aWidth, LONG &aHeight);
 	void GetTotalWidthAndHeight(LONG &aWidth, LONG &aHeight);
+	void ParseMinMaxSizeOption(LPCTSTR aOptionValue, LONG &aWidth, LONG &aHeight);
 
-	ResultType ControlParseOptions(LPTSTR aOptions, GuiControlOptionsType &aOpt, GuiControlType &aControl
+	ResultType ControlParseOptions(LPCTSTR aOptions, GuiControlOptionsType &aOpt, GuiControlType &aControl
 		, GuiIndexType aControlIndex = -1); // aControlIndex is not needed upon control creation.
 	void ControlInitOptions(GuiControlOptionsType &aOpt, GuiControlType &aControl);
 	void ControlAddItems(GuiControlType &aControl, Array *aObj);
 	void ControlSetChoice(GuiControlType &aControl, int aChoice);
-	ResultType ControlLoadPicture(GuiControlType &aControl, LPTSTR aFilename, int aWidth, int aHeight, int aIconNumber);
-	ResultType Show(LPTSTR aOptions);
+	ResultType ControlLoadPicture(GuiControlType &aControl, LPCTSTR aFilename, int aWidth, int aHeight, int aIconNumber);
 	void Cancel();
 	void Close(); // Due to SC_CLOSE, etc.
 	void Escape(); // Similar to close, except typically called when the user presses ESCAPE.
 	void VisibilityChanged();
-	void Submit(ResultToken &aResultToken, bool aHideIt);
 
 	static GuiType *FindGui(HWND aHwnd);
 	static GuiType *FindGuiParent(HWND aHwnd);
 
-	GuiIndexType FindControl(LPTSTR aControlID);
+	GuiIndexType FindControl(LPCTSTR aControlID);
 	GuiIndexType FindControlIndex(HWND aHwnd)
 	{
 		for (;;)
@@ -2676,8 +2665,7 @@ public:
 
 	int FindGroup(GuiIndexType aControlIndex, GuiIndexType &aGroupStart, GuiIndexType &aGroupEnd);
 
-	ResultType SetCurrentFont(LPTSTR aOptions, LPTSTR aFontName);
-	static int FindOrCreateFont(LPTSTR aOptions = _T(""), LPTSTR aFontName = _T(""), FontType *aFoundationFont = NULL
+	static int FindOrCreateFont(LPCTSTR aOptions = _T(""), LPCTSTR aFontName = _T(""), FontType *aFoundationFont = NULL
 		, COLORREF *aColor = NULL);
 	static int FindFont(FontType &aFont);
 	static void FontGetAttributes(FontType &aFont);
@@ -2685,14 +2673,13 @@ public:
 	void Event(GuiIndexType aControlIndex, UINT aNotifyCode, USHORT aGuiEvent = GUI_EVENT_NONE, UINT_PTR aEventInfo = 0);
 	bool ControlWmNotify(GuiControlType &aControl, LPNMHDR aNmHdr, INT_PTR &aRetVal);
 
-	static WORD TextToHotkey(LPTSTR aText);
+	static WORD TextToHotkey(LPCTSTR aText);
 	static LPTSTR HotkeyToText(WORD aHotkey, LPTSTR aBuf);
-	ResultType ControlSetName(GuiControlType &aControl, LPTSTR aName);
+	FResult ControlSetName(GuiControlType &aControl, LPCTSTR aName);
 	void ControlSetEnabled(GuiControlType &aControl, bool aEnabled);
 	void ControlSetVisible(GuiControlType &aControl, bool aVisible);
-	ResultType ParseMoveParams(int aCoord[4], ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount);
-	ResultType ControlMove(GuiControlType &aControl, int aX, int aY, int aWidth, int aHeight);
-	ResultType ControlSetFont(GuiControlType &aControl, LPTSTR aOptions, LPTSTR aFontName);
+	FResult ControlMove(GuiControlType &aControl, int aX, int aY, int aWidth, int aHeight);
+	ResultType ControlSetFont(GuiControlType &aControl, LPCTSTR aOptions, LPCTSTR aFontName);
 	void ControlSetTextColor(GuiControlType &aControl, COLORREF aColor);
 	void ControlSetMonthCalColor(GuiControlType &aControl, COLORREF aColor, UINT aMsg);
 	ResultType ControlChoose(GuiControlType &aControl, ExprTokenType &aParam, BOOL aOneExact = FALSE);
@@ -2707,17 +2694,17 @@ public:
 	GuiControlType *ControlOverrideBkColor(GuiControlType &aControl);
 	void ControlGetBkColor(GuiControlType &aControl, bool aUseWindowColor, HBRUSH &aBrush, COLORREF &aColor);
 	
-	void ControlSetContents(GuiControlType &aControl, ExprTokenType &aContents, ResultToken &aResultToken, bool aIsText);
-	void ControlSetPic(GuiControlType &aControl, LPTSTR aContents, ResultToken &aResultToken);
-	void ControlSetChoice(GuiControlType &aControl, LPTSTR aContents, ResultToken &aResultToken, bool aIsText); // DDL, ComboBox, ListBox, Tab
-	void ControlSetEdit(GuiControlType &aControl, LPTSTR aContents, ResultToken &aResultToken, bool aIsText);
-	void ControlSetDateTime(GuiControlType &aControl, LPTSTR aContents, ResultToken &aResultToken);
-	void ControlSetMonthCal(GuiControlType &aControl, LPTSTR aContents, ResultToken &aResultToken);
-	void ControlSetHotkey(GuiControlType &aControl, LPTSTR aContents, ResultToken &aResultToken);
-	void ControlSetCheck(GuiControlType &aControl, int aValue, ResultToken &aResultToken); // CheckBox, Radio
-	void ControlSetUpDown(GuiControlType &aControl, int aValue, ResultToken &aResultToken);
-	void ControlSetSlider(GuiControlType &aControl, int aValue, ResultToken &aResultToken);
-	void ControlSetProgress(GuiControlType &aControl, int aValue, ResultToken &aResultToken);
+	FResult ControlSetContents(GuiControlType &aControl, ExprTokenType &aContents, bool aIsText);
+	FResult ControlSetPic(GuiControlType &aControl, LPTSTR aContents);
+	FResult ControlSetChoice(GuiControlType &aControl, LPTSTR aContents, bool aIsText); // DDL, ComboBox, ListBox, Tab
+	FResult ControlSetEdit(GuiControlType &aControl, LPTSTR aContents, bool aIsText);
+	FResult ControlSetDateTime(GuiControlType &aControl, LPTSTR aContents);
+	FResult ControlSetMonthCal(GuiControlType &aControl, LPTSTR aContents);
+	FResult ControlSetHotkey(GuiControlType &aControl, LPTSTR aContents);
+	FResult ControlSetCheck(GuiControlType &aControl, int aValue); // CheckBox, Radio
+	FResult ControlSetUpDown(GuiControlType &aControl, int aValue);
+	FResult ControlSetSlider(GuiControlType &aControl, int aValue);
+	FResult ControlSetProgress(GuiControlType &aControl, int aValue);
 
 	enum ValueModeType { Value_Mode, Text_Mode, Submit_Mode };
 
@@ -2759,6 +2746,7 @@ public:
 	static bool ConvertAccelerator(LPTSTR aString, ACCEL &aAccel);
 
 	void SetDefaultMargins();
+	FResult get_Margin(int &aRetVal, int &aMargin);
 
 	// See DPIScale() and DPIUnscale() for more details.
 	int Scale(int x) { return mUsesDPIScaling ? DPIScale(x) : x; }
@@ -2791,9 +2779,22 @@ private:
 #ifdef CONFIG_DEBUGGER
 	friend class Debugger;
 #endif
+#ifdef CONFIG_DLL
+	friend class AutoHotkeyLib;
+	friend class FuncCollection;
+	friend class VarCollection;
+	friend class LabelCollection;
+	friend class EnumFuncs;
+	friend class EnumVars;
+	friend class EnumLabels;
+	friend bool LibNotifyProblem(LPCTSTR, LPCTSTR, Line *, bool);
+#endif
 
 	Line *mFirstLine, *mLastLine;     // The first and last lines in the linked list.
 	Label *mFirstLabel, *mLastLabel;  // The first and last labels in the linked list.
+#ifdef CONFIG_DLL
+	int mLabelCount;
+#endif
 	FuncList mFuncs;
 	
 	UserFunc *mLastHotFunc;		// For hotkey/hotstring functions
@@ -2860,6 +2861,7 @@ private:
 	static bool IsFunctionDefinition(LPTSTR aBuf, LPTSTR aNextBuf);
 	ResultType IsDirective(LPTSTR aBuf);
 	ResultType ConvertDirectiveBool(LPTSTR aBuf, bool &aResult, bool aDefault);
+	ResultType RequirementError(LPCTSTR aRequirement);
 	ResultType ParseAndAddLine(LPTSTR aLineText, ActionTypeType aActionType = ACT_INVALID
 		, LPTSTR aLiteralMap = NULL, size_t aLiteralMapLength = 0);
 	ResultType ParseOperands(LPTSTR aArgText, LPTSTR aArgMap, DerefList &aDeref, int *aPos = NULL, TCHAR aEndChar = 0);
@@ -2940,7 +2942,7 @@ public:
 
 	UserMenu *mTrayMenu; // Our tray menu, which should be destroyed upon exiting the program.
     
-	ResultType Init(global_struct &g, LPTSTR aScriptFilename, bool aIsRestart);
+	ResultType Init(LPTSTR aScriptFilename);
 	ResultType CreateWindows();
 	void EnableClipboardListener(bool aEnable);
 	void AllowMainWindow(bool aAllow);
@@ -3087,8 +3089,6 @@ public:
 	ResultType PreparseVarRefs();
 	void CountNestedFuncRefs(UserFunc &aWithin, LPCTSTR aFuncName);
 
-	ResultType ThrowIfTrue(bool aError);
-	ResultType ThrowIntIfNonzero(int aErrorValue);
 	ResultType ThrowRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo, Line *aLine, ResultType aErrorType, Object *aPrototype = nullptr);
 	ResultType ThrowRuntimeException(LPCTSTR aErrorText, LPCTSTR aExtraInfo = _T(""));
 	ResultType Win32Error(DWORD aError = GetLastError(), ResultType aErrorType = FAIL_OR_OK);
@@ -3215,7 +3215,6 @@ BIF_DECL(BIF_StrLen);
 BIF_DECL(BIF_SubStr);
 BIF_DECL(BIF_InStr);
 BIF_DECL(BIF_StrCase);
-BIF_DECL(BIF_StrSplit);
 BIF_DECL(BIF_StrReplace);
 BIF_DECL(BIF_Sort);
 BIF_DECL(BIF_RegEx);
@@ -3246,7 +3245,6 @@ BIF_DECL(BIF_ATan);
 BIF_DECL(BIF_Exp);
 BIF_DECL(BIF_SqrtLogLn);
 BIF_DECL(BIF_MinMax);
-BIF_DECL(BIF_Hotkey);
 
 BIF_DECL(BIF_Trim); // L31: Also handles LTrim and RTrim.
 BIF_DECL(BIF_VerCompare);
@@ -3293,7 +3291,6 @@ BIF_DECL(BIF_Random);
 BIF_DECL(BIF_Sound);
 BIF_DECL(BIF_SplitPath);
 BIF_DECL(BIF_CaretGetPos);
-BIF_DECL(BIF_MenuSelect);
 BIF_DECL(BIF_RunWait);
 
 
@@ -3306,7 +3303,6 @@ SymbolType TokenIsPureNumeric(ExprTokenType &aToken);
 SymbolType TokenIsPureNumeric(ExprTokenType &aToken, SymbolType &aIsImpureNumeric);
 BOOL TokenIsEmptyString(ExprTokenType &aToken);
 SymbolType TypeOfToken(ExprTokenType &aToken);
-SymbolType TypeOfToken(ExprTokenType &aToken, SymbolType &aIsNum);
 __int64 TokenToInt64(ExprTokenType &aToken);
 double TokenToDouble(ExprTokenType &aToken, BOOL aCheckForHex = TRUE);
 LPTSTR TokenToString(ExprTokenType &aToken, LPTSTR aBuf = NULL, size_t *aLength = NULL);
@@ -3322,6 +3318,8 @@ LPTSTR TokenTypeString(ExprTokenType &aToken);
 #define INTEGER_TYPE_STRING _T("Integer")
 #define FLOAT_TYPE_STRING _T("Float")
 
+ResultType TokenToStringParam(ResultToken &aResultToken, ExprTokenType *aParam[], int aIndex, LPTSTR aBuf, LPTSTR &aString, size_t *aLength = nullptr, bool aPermitObject = false);
+
 ResultType MemoryError();
 ResultType ValueError(LPCTSTR aErrorText, LPCTSTR aExtraInfo, ResultType aErrorType);
 ResultType TypeError(LPCTSTR aExpectedType, ExprTokenType &aActualValue);
@@ -3332,6 +3330,8 @@ FResult FError(LPCTSTR aErrorText, LPCTSTR aExtraInfo = _T(""), Object *aPrototy
 FResult FValueError(LPCTSTR aErrorText, LPCTSTR aExtraInfo = _T(""));
 FResult FTypeError(LPCTSTR aExpectedType, ExprTokenType &aActualValue);
 FResult FParamError(int aIndex, ExprTokenType *aParam, LPCTSTR aExpectedType = nullptr);
+
+ResultType FResultToError(ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount, FResult aResult, int aFirstParam);
 
 void PauseCurrentThread();
 void ToggleSuspendState();
@@ -3347,11 +3347,6 @@ bool FileCreateDir(LPCTSTR aDirSpec);
 
 ResultType DetermineTargetHwnd(HWND &aWindow, ResultToken &aResultToken, ExprTokenType &aToken);
 ResultType DetermineTargetWindow(HWND &aWindow, ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount, int aNonWinParamCount = 0);
-ResultType DetermineTargetControl(HWND &aControl, HWND &aWindow, ResultToken &aResultToken, ExprTokenType *aParam[], int aParamCount, int aNonWinParamCount = 0, bool aThrowIfNotFound = true);
-#define DETERMINE_TARGET_CONTROL(param_offset) \
-	HWND target_window, control_window; \
-	if (!DetermineTargetControl(control_window, target_window, aResultToken, aParam + param_offset, aParamCount - param_offset)) \
-		return;
 
 #define WINTITLE_PARAMETERS_DECL ExprTokenType *aWinTitle, optl<StrArg> aWinText, optl<StrArg> aExcludeTitle, optl<StrArg> aExcludeText
 #define WINTITLE_PARAMETERS aWinTitle, aWinText, aExcludeTitle, aExcludeText
@@ -3380,6 +3375,8 @@ FResult PixelSearch(BOOL *aFound, ResultToken *aFoundX, ResultToken *aFoundY
 	, int aLeft, int aTop, int aRight, int aBottom, COLORREF aColorRGB
 	, int aVariation, LPTSTR aGetColor);
 
+bool ColorToBGR(ExprTokenType &aColorNameOrRGB, COLORREF &aBGR);
+
 ResultType GetObjectPtrProperty(IObject *aObject, LPTSTR aPropName, UINT_PTR &aPtr, ResultToken &aResultToken, bool aOptional = false);
 ResultType GetObjectIntProperty(IObject *aObject, LPTSTR aPropName, __int64 &aValue, ResultToken &aResultToken, bool aOptional = false);
 ResultType SetObjectIntProperty(IObject * aObject, LPTSTR aPropName, __int64 aValue, ResultToken & aResultToken);
@@ -3387,6 +3384,11 @@ void GetBufferObjectPtr(ResultToken &aResultToken, IObject *obj, size_t &aPtr, s
 void GetBufferObjectPtr(ResultToken &aResultToken, IObject *obj, size_t &aPtr);
 void ObjectToString(ResultToken & aResultToken, ExprTokenType & aThisToken, IObject * aObject);
 
+
+#ifdef CONFIG_DLL
+bool LibNotifyProblem(ExprTokenType &aProblem);
+bool LibNotifyProblem(LPCTSTR aMessage, LPCTSTR aExtra, Line *aLine, bool aWarn = false);
+#endif
 
 #endif
 

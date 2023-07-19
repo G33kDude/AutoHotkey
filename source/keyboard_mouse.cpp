@@ -682,11 +682,11 @@ void SendKeys(LPCTSTR aKeys, SendRawModes aSendRaw, SendModes aSendModeOrig, HWN
 					}
 				}
 
-				else if (key_text_length > 4 && !_tcsnicmp(key_text, _T("ASC "), 4) && !aTargetWindow) // {ASC nnnnn}
+				else if (key_text_length > 4 && !_tcsicmp(key_text, _T("ASC")) && !aTargetWindow) // {ASC nnnnn}
 				{
 					// Include the trailing space in "ASC " to increase uniqueness (selectivity).
 					// Also, sending the ASC sequence to window doesn't work, so don't even try:
-					SendASC(omit_leading_whitespace(key_text + 3));
+					SendASC(next_word);
 					// Do this only once at the end of the sequence:
 					DoKeyDelay(); // It knows not to do the delay for SM_INPUT.
 				}
@@ -1754,18 +1754,6 @@ void KeyEvent(KeyEventTypes aEventType, vk_type aVK, sc_type aSC, HWND aTargetWi
 		// Users of the below want them updated only for keybd_event() keystrokes (not PostMessage ones):
 		sPrevEventType = aEventType;
 		sPrevVK = aVK;
-		// Turn off BlockInput momentarily to support sending of the ALT key.
-		// Jon Bennett noted: "As many of you are aware BlockInput was "broken" by a SP1 hotfix under
-		// Windows XP so that the ALT key could not be sent. I just tried it under XP SP2 and it seems
-		// to work again."  In light of this, it seems best to unconditionally and momentarily disable
-		// input blocking regardless of which OS is being used.
-		// For thread safety, allow block-input modification only by the main thread.  This should avoid
-		// any chance that block-input will get stuck on due to two threads simultaneously reading+changing
-		// g_BlockInput (changes occur via calls to ScriptBlockInput).
-		bool we_turned_blockinput_off = g_BlockInput && (aVK == VK_MENU || aVK == VK_LMENU || aVK == VK_RMENU)
-			&& !caller_is_keybd_hook; // Ordered for short-circuit performance.
-		if (we_turned_blockinput_off)
-			OurBlockInput(false);
 
 		ResultType target_layout_has_altgr = caller_is_keybd_hook ? LayoutHasAltGr(GetFocusedKeybdLayout())
 			: sTargetLayoutHasAltGr;
@@ -1827,9 +1815,6 @@ void KeyEvent(KeyEventTypes aEventType, vk_type aVK, sc_type aSC, HWND aTargetWi
 			if (do_key_history)
 				UpdateKeyEventHistory(true, aVK, aSC);
 		}
-
-		if (we_turned_blockinput_off)  // Already made thread-safe by action higher above.
-			OurBlockInput(true);  // Turn BlockInput back on.
 	}
 
 	if (aDoKeyDelay) // SM_PLAY also uses DoKeyDelay(): it stores the delay item in the event array.
@@ -2080,7 +2065,7 @@ void PerformMouseCommon(ActionTypeType aActionType, vk_type aVK, int aX1, int aY
 void MouseClickDrag(vk_type aVK, int aX1, int aY1, int aX2, int aY2, int aSpeed, bool aMoveOffset)
 {
 	// Check if one of the coordinates is missing, which can happen in cases where this was called from
-	// a source that didn't already validate it. Can't call Line::ValidateMouseCoords() because that accepts strings.
+	// a source that didn't already validate it.
 	if (   (aX1 == COORD_UNSPECIFIED && aY1 != COORD_UNSPECIFIED) || (aX1 != COORD_UNSPECIFIED && aY1 == COORD_UNSPECIFIED)
 		|| (aX2 == COORD_UNSPECIFIED && aY2 != COORD_UNSPECIFIED) || (aX2 != COORD_UNSPECIFIED && aY2 == COORD_UNSPECIFIED)   )
 		return;
@@ -3585,6 +3570,33 @@ modLR_type GetModifierLRState(bool aExplicitlyGet)
 		// to a process with higher integrity level than our own became active while the key was
 		// down, so we saw the down event but not the up event.
 		modLR_type modifiers_wrongly_down = g_modifiersLR_logical & ~modifiersLR;
+		// modifiers_wrongly_down can sometimes include modifiers that have only just been pressed
+		// but aren't yet reflected by IsKeyDownAsync().  This happens much more often if a keyboard
+		// hook is installed AFTER our own.  The following simple script was enough to reproduce this:
+		//	~*RWin::GetKeyState("RWin", "P")
+		//	>#/::MsgBox  ; This hotkey sometimes or always failed to fire.
+		// The sequence of events was probably something like this:
+		//  - OS detects RWin down.
+		//  - OS calls other hook.
+		//  - Other hook calls ours via CallNextHookEx (meaning its thread is blocked
+		//    waiting for the call to return).
+		//  - Our hook updates key state, posts AHK_HOOK_HOTKEY and RETURNS IMMEDIATELY
+		//    (but the other hook is in another thread, so it doesn't resume immediately).
+		//  - Script thread receives AHK_HOOK_HOTKEY and fires hotkey.
+		//  - Hotkey calls Send or GetKeyState, triggering the section below, adjusting
+		//    g_modifiersLR_logical to match GetAsyncKeyState().
+		//  - Other hook's thread wakes up and returns.
+		//  - OS updates key state, so then GetAsyncKeyState() reports the correct state
+		//    and g_modifiersLR_logical is incorrect.
+		//  - RWin+/ doesn't fire the hotkey because the hook thinks RWin isn't down,
+		//    even though KeyHistory shows that it should be down.
+		// The issue occurred with maybe 50% frequency if the other hook was an AutoHotkey hook,
+		// and 100% frequency if the other hook was implemented by a script (which is slower).
+		// Only the last pressed modifier is excluded, since any other key-down or key-up being
+		// detected would usually mean that the previous call to the hook has finished (although
+		// the hook can be called recursively with artificial input).
+		if (g_modifiersLR_last_pressed && GetTickCount() - g_modifiersLR_last_pressed_time < 20)
+			modifiers_wrongly_down &= ~g_modifiersLR_last_pressed;
 		if (modifiers_wrongly_down)
 		{
 			// Adjust the physical and logical hook state to release the keys that are wrongly down.

@@ -1,24 +1,30 @@
-# AutoHotkey_L #
+# AutoHotkey #
 
-AutoHotkey is a free, open source macro-creation and automation software utility that allows users to automate repetitive tasks. It is driven by a custom scripting language that is aimed specifically at providing keyboard shortcuts, otherwise known as hotkeys.
+AutoHotkey is a free, open source macro-creation and automation software utility that allows users to automate repetitive tasks. It is driven by a custom scripting language that has special provision for defining keyboard shortcuts, otherwise known as hotkeys.
 
-AutoHotkey_L started as a fork of AutoHotkey but has been the main branch for some time.
-
-https://autohotkey.com/
+https://www.autohotkey.com/
 
 
 ## How to Compile ##
 
-AutoHotkey v2 is developed with [Microsoft Visual Studio Community 2019](https://www.visualstudio.com/products/visual-studio-community-vs), which is a free download from Microsoft.
+AutoHotkey is developed with [Microsoft Visual Studio Community 2022](https://www.visualstudio.com/products/visual-studio-community-vs), which is a free download from Microsoft.
 
   - Get the source code.
   - Open AutoHotkeyx.sln in Visual Studio.
   - Select the appropriate Build and Platform.
   - Build.
 
-The project is configured in a way that allows building with Visual Studio 2012 or later. However, for the v2 branch, some newer C++ language features are used and therefore a later version of the compiler might be required.
+The project is configured in a way that allows building with Visual Studio 2012 or later, but only the 2022 toolset is regularly tested. Some newer C++ language features are used and therefore a later version of the compiler might be required.
 
-The project is configured to use a platform toolset with "_xp" suffix, if available.
+
+## Developing in VS Code ##
+
+AutoHotkey v2 can also be built and debugged in VS Code.
+
+Requirements:
+  - [C/C++ for Visual Studio Code](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools). VS Code might prompt you to install this if you open a .cpp file.
+  - [Build Tools for Visual Studio 2022](https://aka.ms/vs/17/release/vs_BuildTools.exe) with the "Desktop development with C++" workload, or similar (some older or newer versions and different products should work).
+
 
 
 ## Build Configurations ##
@@ -32,7 +38,7 @@ AutoHotkeyx.vcxproj contains several combinations of build configurations.  The 
 Secondary configurations are:
 
   - **(mbcs)**: ANSI (multi-byte character set). Configurations without this suffix are Unicode.
-  - **(minimal)**: Alternative project settings for producing a smaller binary, possibly with lower performance and added dependencies.
+  - **.dll**: Builds an experimental dll for use hosting the interpreter, such as to enable the use of v1 libraries in a v2 script. See [README-LIB.md](README-LIB.md).
 
 
 ## Platforms ##
@@ -43,11 +49,3 @@ AutoHotkeyx.vcxproj includes the following Platforms:
   - **x64**: for Windows x64.
 
 AutoHotkey supports Windows XP with or without service packs and Windows 2000 via an asm patch (win2kcompat.asm).  Support may be removed if maintaining it becomes non-trivial.  Older versions are not supported.
-
-## AutoHotkey v2 Beta ##
-
-https://autohotkey.com/v2/
-
-[v2 Branch](https://github.com/Lexikos/AutoHotkey_L/tree/alpha)
-
-

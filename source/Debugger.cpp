@@ -34,6 +34,8 @@ Debugger g_Debugger;
 CStringA g_DebuggerHost;
 CStringA g_DebuggerPort;
 
+LPCTSTR g_AutoExecuteThreadDesc = _T("Auto-execute"); // This is used to reduce code size (allow comparing address vs. string).
+
 // The first breakpoint uses sMaxId + 1. Don't change this without also changing breakpoint_remove.
 int Breakpoint::sMaxId = 0;
 
@@ -102,6 +104,73 @@ inline bool BreakpointLineIsSlippery(Line *aLine)
 		: act == ACT_ELSE || act == ACT_BLOCK_BEGIN;
 }
 
+bool LineIsFatArrowBlock(Line *line)
+{
+	return line->mActionType == ACT_BLOCK_BEGIN && line->mAttribute
+		// line->mRelatedLine isn't used because it can be changed by Line::ExecUntil for ACT_STATIC.
+		//&& line->mNextLine // Always true at this stage.
+		&& line->mNextLine->mNextLine
+		&& line->mNextLine->mNextLine->mLineNumber == line->mLineNumber
+		&& line->mNextLine->mNextLine->mFileIndex == line->mFileIndex;
+}
+
+Line *Debugger::FindFirstLineForBreakpoint(int file_index, UINT line_no)
+{
+	Line *found_line = nullptr;
+	for (Line *line = g_script.mFirstLine; line; line = line->mNextLine)
+	{
+		if (line->mFileIndex == file_index && line->mLineNumber >= line_no)
+		{
+			// ACT_ELSE and ACT_BLOCK_BEGIN generally don't cause PreExecLine() to be called,
+			// so any breakpoint set on one of those lines would never be hit.  Attempting to
+			// set a breakpoint on one of these should act like setting a breakpoint on a line
+			// which contains no code: put the breakpoint at the next line instead.
+			// Without this check, setting a breakpoint on a line like "else Exit" would not work.
+			// ACT_CASE executes when the *previous* case reaches its end, so for that case
+			// we want to shift the breakpoint to the first Line after the ACT_CASE.
+			// An expression such as x:=()=>y results in a fat arrow function prior to the assignment;
+			// in that case breakpoints need to be set on a series of lines (inside each fat arrow
+			// function and on the final expression Line).
+			if (BreakpointLineIsSlippery(line) && !LineIsFatArrowBlock(line))
+				continue;
+			// Use the first line of code at or after lineno, like Visual Studio.
+			// To display the breakpoint correctly, an IDE should use breakpoint_get.
+			if (!found_line || found_line->mLineNumber > line->mLineNumber)
+				found_line = line;
+			if (line->mLineNumber == line_no)
+				break;
+			//else must keep searching, since class var initializers can cause lines to be listed out of order.
+		}
+	}
+	return found_line;
+}
+
+// Set Line::mBreakpoint for a single executable line and all fat-arrow functions
+// that it contains.  line should be as determined by FindFirstLineForBreakpoint().
+void SetBreakpointForLineGroup(Line *line, Breakpoint *bp)
+{
+	auto line_no = line->mLineNumber;
+	auto file_no = line->mFileIndex;
+	while (line->mActionType == ACT_BLOCK_BEGIN)
+	{
+		// Under the conditions established by FindFirstLineForBreakpoint(), this line can
+		// only be the block-begin of a fat-arrow function, which is always followed by a
+		// return and block-end, then either another fat-arrow or the final expression Line.
+		ASSERT(LineIsFatArrowBlock(line) && line->mNextLine->mActionType == ACT_RETURN
+			&& line->mNextLine->mNextLine->mActionType == ACT_BLOCK_END);
+		line = line->mNextLine; // Set it to the return.
+		if (!line)
+			return; // Shouldn't happen.
+		line->mBreakpoint = bp;
+		if (   !(line = line->mNextLine)     // Set it to the block-end.
+			|| !(line = line->mNextLine)   ) // Set it to the next fat-arrow block-begin or the final expression.
+			return; // Shouldn't happen.
+		if (line->mLineNumber != line_no || line->mFileIndex != file_no)
+			return; // May happen after an ACT_STATIC line is removed.
+	}
+	line->mBreakpoint = bp;
+}
+
 
 // PreExecLine: aLine is about to execute; handle current line marker, breakpoints and step into/over/out.
 int Debugger::PreExecLine(Line *aLine)
@@ -117,7 +186,18 @@ int Debugger::PreExecLine(Line *aLine)
 	{
 		if (bp->temporary)
 		{
-			aLine->mBreakpoint = NULL;
+			auto line = aLine;
+			if (line->mPrevLine && LineIsFatArrowBlock(line->mPrevLine))
+			{
+				// This line is inside a fat-arrow function, which means the breakpoint must have been
+				// set not just for this line, but also for all other fat-arrow functions on this line
+				// and the expression line which contains them (and is last in the Line list).
+				Line *prev;
+				for (line = line->mPrevLine; // Init to the fat-arrow's block-begin.
+					(prev = line->mPrevLine) && prev->mActionType == ACT_BLOCK_END && LineIsFatArrowBlock(prev->mParentLine);
+					line = prev->mParentLine); // Update to the previous fat-arrow's block-begin.
+			}
+			SetBreakpointForLineGroup(line, nullptr);
 			delete bp;
 		}
 		return Break();
@@ -148,6 +228,22 @@ int Debugger::PreExecLine(Line *aLine)
 }
 
 
+bool Debugger::PreThrow(ExprTokenType *aException)
+{
+	if (!mBreakOnException)
+		return false;
+	if (mBreakOnExceptionIsTemporary)
+		mBreakOnException = mBreakOnExceptionWasSet = false;
+	mThrownToken = aException;
+	// The spec doesn't provide a way to differentiate between handled and unhandled exceptions,
+	// nor when to use the "exception" and "error" statuses, so we'll use them for that:
+	Break((g->ExcptMode & EXCPTMODE_CATCH) ? "exception" : "error");
+	bool suppress_default_handling = mThrownToken == NULL; // Signal from client via property_set.
+	mThrownToken = NULL;
+	return suppress_default_handling;
+}
+
+
 bool Debugger::HasPendingCommand()
 // Returns true if there is data in the socket's receive buffer.
 // This is used for receiving commands asynchronously.
@@ -159,13 +255,13 @@ bool Debugger::HasPendingCommand()
 }
 
 
-int Debugger::EnterBreakState()
+int Debugger::EnterBreakState(LPCSTR aReason)
 {
 	if (mInternalState != DIS_Break)
 	{
 		if (mInternalState != DIS_Starting)
 			// Send a response for the previous continuation command.
-			if (int err = SendContinuationResponse())
+			if (int err = SendContinuationResponse(nullptr, "break", aReason))
 				return err;
 		// Remove keyboard/mouse hooks.
 		if (mDisabledHooks = GetActiveHooks())
@@ -190,15 +286,15 @@ void Debugger::ExitBreakState()
 }
 
 
-int Debugger::Break()
+int Debugger::Break(LPCSTR aReason)
 {
-	return ProcessCommands(true);
+	return ProcessCommands(aReason);
 }
 
 
 const int MAX_DBGP_ARGS = 16; // More than currently necessary.
 
-int Debugger::ProcessCommands(bool aBreakFirst)
+int Debugger::ProcessCommands(LPCSTR aBreakReason)
 {
 	int err;
 
@@ -210,8 +306,8 @@ int Debugger::ProcessCommands(bool aBreakFirst)
 	//  - property_set when an object with __delete is released.
 	if (mInternalState == DIS_Break)
 		return DEBUGGER_E_OK;
-	if (aBreakFirst)
-		if (err = EnterBreakState())
+	if (aBreakReason)
+		if (err = EnterBreakState(aBreakReason))
 			return err;
 
 	// Disable notification of READ readiness and reset socket to synchronous mode.
@@ -443,7 +539,7 @@ DEBUGGER_COMMAND(Debugger::feature_get)
 	// Not supported: data_encoding - assume base64.
 	// Not supported: breakpoint_languages - assume only %language_name% is supported.
 	else if (!strcmp(feature_name, "breakpoint_types"))
-		setting = "line";
+		setting = "line exception";
 	else if (!strcmp(feature_name, "multiple_sessions"))
 		setting = "0";
 	else if (!strcmp(feature_name, "max_data"))
@@ -623,21 +719,39 @@ DEBUGGER_COMMAND(Debugger::breakpoint_set)
 			temporary = (*value != '0');
 			break;
 			
-		case 'm': // function
 		case 'x': // exception
+			if (!stricmp(value, "Any")) // Require this or nothing, for now.
+				break;
+			return DEBUGGER_E_INVALID_OPTIONS;
+
+		case 'm': // function
 		case 'h': // hit_value
 		case 'o': // hit_condition = >= | == | %
 		case '-': // expression for conditional breakpoints
-			// These aren't used/supported, but ignored for now.
-			break;
-
+			// These aren't used/supported.
 		default:
 			return DEBUGGER_E_INVALID_OPTIONS;
 		}
 	}
 
-	if (!type || strcmp(type, "line")) // i.e. type != "line"
+	// Breakpoint type is required according to the spec, but allowing it to be omitted
+	// and defaulting to "line" is more convenient for debugging the debugger via console.
+	if (type && strcmp(type, "line")) // i.e. type was specified and is not "line".
+	{
+		if (!strcmp(type, "exception") && lineno == 0 && !filename)
+		{
+			mBreakOnException = state;
+			mBreakOnExceptionIsTemporary = temporary;
+			mBreakOnExceptionWasSet = true;
+			if (!mBreakOnExceptionID)
+				mBreakOnExceptionID = Breakpoint::AllocateID();
+			
+			return mResponseBuf.WriteF(
+				"<response command=\"breakpoint_set\" transaction_id=\"%e\" state=\"%s\" id=\"%i\"/>"
+				, aTransactionId, state ? "enabled" : "disabled", mBreakOnExceptionID);
+		}
 		return DEBUGGER_E_BREAKPOINT_TYPE;
+	}
 	if (lineno < 1)
 		return DEBUGGER_E_BREAKPOINT_INVALID;
 
@@ -658,38 +772,20 @@ DEBUGGER_COMMAND(Debugger::breakpoint_set)
 			return DEBUGGER_E_BREAKPOINT_INVALID;
 	}
 
-	Line *line = NULL, *found_line = NULL;
-	for (line = line ? line->mNextLine : g_script.mFirstLine; line; line = line->mNextLine)
+	if (auto line = FindFirstLineForBreakpoint(file_index, lineno))
 	{
-		if (line->mFileIndex == file_index && line->mLineNumber >= lineno)
+		Breakpoint *bp = line->mBreakpoint;
+		if (!bp)
 		{
-			// ACT_ELSE and ACT_BLOCK_BEGIN generally don't cause PreExecLine() to be called,
-			// so any breakpoint set on one of those lines would never be hit.  Attempting to
-			// set a breakpoint on one of these should act like setting a breakpoint on a line
-			// which contains no code: put the breakpoint at the next line instead.
-			// Without this check, setting a breakpoint on a line like "else Exit" would not work.
-			// ACT_CASE executes when the *previous* case reaches its end, so for that case
-			// we want to shift the breakpoint to the first Line after the ACT_CASE.
-			if (BreakpointLineIsSlippery(line))
-				continue;
-			// Use the first line of code at or after lineno, like Visual Studio.
-			// To display the breakpoint correctly, an IDE should use breakpoint_get.
-			if (!found_line || found_line->mLineNumber > line->mLineNumber)
-				found_line = line;
-			// Must keep searching, since class var initializers can cause lines to be listed out of order.
-			//break;
+			bp = new Breakpoint();
+			SetBreakpointForLineGroup(line, bp);
 		}
-	}
-	if (found_line)
-	{
-		if (!found_line->mBreakpoint)
-			found_line->mBreakpoint = new Breakpoint();
-		found_line->mBreakpoint->state = state;
-		found_line->mBreakpoint->temporary = temporary;
+		bp->state = state;
+		bp->temporary = temporary;
 
 		return mResponseBuf.WriteF(
 			"<response command=\"breakpoint_set\" transaction_id=\"%e\" state=\"%s\" id=\"%i\"/>"
-			, aTransactionId, state ? "enabled" : "disabled", found_line->mBreakpoint->id);
+			, aTransactionId, state ? "enabled" : "disabled", bp->id);
 	}
 	// There are no lines of code beginning at or after lineno.
 	return DEBUGGER_E_BREAKPOINT_INVALID;
@@ -697,10 +793,15 @@ DEBUGGER_COMMAND(Debugger::breakpoint_set)
 
 int Debugger::WriteBreakpointXml(Breakpoint *aBreakpoint, Line *aLine)
 {
-	mResponseBuf.WriteF("<breakpoint id=\"%i\" type=\"line\" state=\"%s\" filename=\""
-					, aBreakpoint->id, aBreakpoint->state ? "enabled" : "disabled");
-	mResponseBuf.WriteFileURI(U4T(Line::sSourceFile[aLine->mFileIndex]));
-	return mResponseBuf.WriteF("\" lineno=\"%u\"/>", aLine->mLineNumber);
+	return mResponseBuf.WriteF("<breakpoint id=\"%i\" type=\"line\" state=\"%s\" filename=\"%r\" lineno=\"%u\"/>"
+		, aBreakpoint->id, aBreakpoint->state ? "enabled" : "disabled"
+		, Line::sSourceFile[aLine->mFileIndex], aLine->mLineNumber);
+}
+
+int Debugger::WriteExceptionBreakpointXml()
+{
+	return mResponseBuf.WriteF("<breakpoint id=\"%i\" type=\"exception\" state=\"%s\" exception=\"Any\"/>"
+		, mBreakOnExceptionID, mBreakOnException ? "enabled" : "disabled");
 }
 
 DEBUGGER_COMMAND(Debugger::breakpoint_get)
@@ -722,6 +823,13 @@ DEBUGGER_COMMAND(Debugger::breakpoint_get)
 
 			return DEBUGGER_E_OK;
 		}
+	}
+
+	if (breakpoint_id == mBreakOnExceptionID && mBreakOnExceptionWasSet)
+	{
+		mResponseBuf.WriteF("<response command=\"breakpoint_get\" transaction_id=\"%e\">", aTransactionId);
+		WriteExceptionBreakpointXml();
+		return mResponseBuf.Write("</response>");
 	}
 
 	return DEBUGGER_E_BREAKPOINT_NOT_FOUND;
@@ -781,25 +889,14 @@ DEBUGGER_COMMAND(Debugger::breakpoint_update)
 			if (lineno && line->mLineNumber != lineno)
 			{
 				// Move the breakpoint within its current file.
-				int file_index = line->mFileIndex;
-				Line *old_line = line;
-
-				for (line = g_script.mFirstLine; line; line = line->mNextLine)
+				Line *new_line = FindFirstLineForBreakpoint(line->mFileIndex, lineno);
+				if (new_line != line)
 				{
-					if (line->mFileIndex == file_index && line->mLineNumber >= lineno)
-					{
-						line->mBreakpoint = bp;
-						break;
-					}
+					if (!new_line)
+						return DEBUGGER_E_BREAKPOINT_INVALID;
+					SetBreakpointForLineGroup(line, nullptr);
+					SetBreakpointForLineGroup(new_line, bp);
 				}
-
-				// If line is NULL, the line was not found.
-				if (!line)
-					return DEBUGGER_E_BREAKPOINT_INVALID;
-
-				// Seems best to only remove the breakpoint from its previous line
-				// once we know the breakpoint_update has succeeded.
-				old_line->mBreakpoint = NULL;
 			}
 
 			if (state != -1)
@@ -807,6 +904,12 @@ DEBUGGER_COMMAND(Debugger::breakpoint_update)
 
 			return DEBUGGER_E_OK;
 		}
+	}
+
+	if (breakpoint_id == mBreakOnExceptionID)
+	{
+		mBreakOnException = state;
+		return DEBUGGER_E_OK;
 	}
 
 	return DEBUGGER_E_BREAKPOINT_NOT_FOUND;
@@ -826,10 +929,16 @@ DEBUGGER_COMMAND(Debugger::breakpoint_remove)
 		if (line->mBreakpoint && line->mBreakpoint->id == breakpoint_id)
 		{
 			delete line->mBreakpoint;
-			line->mBreakpoint = NULL;
-
+			SetBreakpointForLineGroup(line, nullptr);
 			return DEBUGGER_E_OK;
 		}
+	}
+
+	if (breakpoint_id == mBreakOnExceptionID && mBreakOnExceptionWasSet)
+	{
+		mBreakOnException = false;
+		mBreakOnExceptionWasSet = false;
+		return DEBUGGER_E_OK;
 	}
 
 	return DEBUGGER_E_BREAKPOINT_NOT_FOUND;
@@ -850,6 +959,9 @@ DEBUGGER_COMMAND(Debugger::breakpoint_list)
 			WriteBreakpointXml(line->mBreakpoint, line);
 		}
 	}
+
+	if (mBreakOnExceptionWasSet)
+		WriteExceptionBreakpointXml();
 
 	return mResponseBuf.Write("</response>");
 }
@@ -895,7 +1007,7 @@ DEBUGGER_COMMAND(Debugger::stack_get)
 			else if (se->type == DbgStack::SE_Thread)
 			{
 				// !se->line implies se->type == SE_Thread.
-				if (_tcscmp(se->desc, _T("Auto-execute")) && se[1].type == DbgStack::SE_UDF)
+				if (se->desc != g_AutoExecuteThreadDesc && se[1].type == DbgStack::SE_UDF)
 					// Show the function's jump-to line since se->line is most likely whatever line
 					// this thread interrupted.  Don't do it for the auto-execute thread since in
 					// that case the function doesn't represent the thread's overall execution.
@@ -910,9 +1022,8 @@ DEBUGGER_COMMAND(Debugger::stack_get)
 			{
 				line = se->line;
 			}
-			mResponseBuf.WriteF("<stack level=\"%i\" type=\"file\" filename=\"", level);
-			mResponseBuf.WriteFileURI(U4T(Line::sSourceFile[line->mFileIndex]));
-			mResponseBuf.WriteF("\" lineno=\"%u\" where=\"", line->mLineNumber);
+			mResponseBuf.WriteF("<stack level=\"%i\" type=\"file\" filename=\"%r\" lineno=\"%u\" where=\""
+				, level, Line::sSourceFile[line->mFileIndex], line->mLineNumber);
 			switch (se->type)
 			{
 			case DbgStack::SE_Thread:
@@ -1108,7 +1219,7 @@ void Object::DebugWriteProperty(IDebugProperties *aDebugger, int aPage, int aPag
 	DebugCookie cookie;
 	aDebugger->BeginProperty(NULL, "object", num_children, cookie);
 
-	if (aDepth)
+	if (aDepth > 0)
 	{
 		int page_start = aPageSize * aPage, page_end = aPageSize * (aPage + 1);
 
@@ -1145,7 +1256,7 @@ void Object::DebugWriteProperty(IDebugProperties *aDebugger, int aPage, int aPag
 		}
 		if (enum_method && i < page_end)
 		{
-			if (dynamic_cast<BuiltInMethod *>(enum_method))
+			if (dynamic_cast<NativeFunc *>(enum_method))
 			{
 				// Built-in enumerators are always safe to call automatically.
 				aDebugger->WriteEnumItems(this, i - field_count, page_end - field_count);
@@ -1406,6 +1517,7 @@ int Debugger::ParsePropertyName(LPCSTR aFullName, int aDepth, int aVarScope, Exp
 	Var *var = NULL;
 	VarBkp *varbkp = NULL;
 	SymbolType key_type;
+	IObject *iobj = NULL;
 
 	aResult.kind = PropNone;
 
@@ -1419,77 +1531,102 @@ int Debugger::ParsePropertyName(LPCSTR aFullName, int aDepth, int aVarScope, Exp
 
 	// Validate name for more accurate error-reporting.
 	if (name_length > MAX_VAR_NAME_LENGTH || !Var::ValidateName(name, DISPLAY_NO_ERROR))
-		return DEBUGGER_E_INVALID_OPTIONS;
-
-	VarList *vars = nullptr;
-	bool search_local = (aVarScope & VAR_LOCAL) && g->CurrentFunc;
-	if (search_local && aDepth > 0)
 	{
-		VarList *static_vars = nullptr;
-		VarBkp *bkps = nullptr, *bkps_end = nullptr;
-		mStack.GetLocalVars(aDepth, vars, static_vars, bkps, bkps_end);
-		for ( ; bkps < bkps_end; ++bkps)
-			if (!_tcsicmp(bkps->mVar->mName, name))
+		if (!_tcsicmp(name, _T("<exception>")))
+		{
+			if (!mThrownToken)
+				return DEBUGGER_E_UNKNOWN_PROPERTY;
+			if (!name_end)
 			{
-				varbkp = bkps;
-				break;
+				// `property_get -n <exception>` is our non-standard way to retrieve the thrown value during an exception break.
+				// `property_set -n <exception> --` is our non-standard way to "clear the exception" (suppress the error dialog).
+				if (aSetValue && TokenIsEmptyString(*aSetValue))
+				{
+					mThrownToken = nullptr;
+					return DEBUGGER_E_OK;
+				}
+				aResult.kind = PropValue;
+				aResult.value.CopyValueFrom(*mThrownToken);
+				if (aResult.value.symbol == SYM_OBJECT)
+					aResult.value.object->AddRef();
+				return DEBUGGER_E_OK;
 			}
-		if (!varbkp && static_vars)
-			var = static_vars->Find(name);
-		// If a var wasn't found above, make sure not to return a local var of the wrong function or depth.
-		if (!var)
-			aVarScope = FINDVAR_GLOBAL;
-	}
-
-	if (!var && !varbkp)
-	{
-		int insert_pos;
-		if (vars) // Use this first to support aDepth.
-			var = vars->Find(name, &insert_pos);
-		if (!var) // Use FindVar to support built-ins and globals.
-			var = g_script.FindVar(name, name_length, aVarScope, &vars, &insert_pos);
-		if (!var && aSetValue) // Avoid creating empty variables.
-			var = g_script.AddVar(name, name_length, vars, insert_pos
-				, search_local ? VAR_LOCAL : VAR_GLOBAL);
-	}
-
-	if (!var && !varbkp)
-		return DEBUGGER_E_UNKNOWN_PROPERTY;
-
-	if (!name_end)
-	{
-		// Just a variable name.
-		if (var)
-			aResult.var = var, aResult.kind = PropVar;
+			iobj = TokenToObject(*mThrownToken);
+		}
 		else
-			aResult.bkp = varbkp, aResult.kind = PropVarBkp;
-		return DEBUGGER_E_OK;
-	}
-	IObject *iobj = nullptr;
-	if (varbkp && varbkp->mType == VAR_ALIAS)
-		var = varbkp->mAliasFor;
-	if (var)
-	{
-		auto error = GetPropertyValue(*var, aResult); // Supports built-in vars.
-		if (error)
-			return error;
-		if (aResult.value.symbol == SYM_OBJECT)
-			iobj = aResult.value.object; // Take ownership of this reference, which is overwitten below.
-		else
-			aResult.value.Free(); // Free mem_to_free if non-null.
-		// aResult.value must be reinitialized because Invoke expects it to have a default of "".
-		// For x.<base> and x.<enum>, it's expected to have a value that doesn't need Free() called.
-		aResult.value.InitResult(aResult.value.buf);
+			return DEBUGGER_E_INVALID_OPTIONS;
 	}
 	else
 	{
-		if (varbkp->mAttrib & VAR_ATTRIB_IS_OBJECT) 
+		VarList *vars = nullptr;
+		bool search_local = (aVarScope & VAR_LOCAL) && g->CurrentFunc;
+		if (search_local && aDepth > 0)
 		{
-			iobj = varbkp->mObject;
-			iobj->AddRef();
+			VarList *static_vars = nullptr;
+			VarBkp *bkps = nullptr, *bkps_end = nullptr;
+			mStack.GetLocalVars(aDepth, vars, static_vars, bkps, bkps_end);
+			for ( ; bkps < bkps_end; ++bkps)
+				if (!_tcsicmp(bkps->mVar->mName, name))
+				{
+					varbkp = bkps;
+					break;
+				}
+			if (!varbkp && static_vars)
+				var = static_vars->Find(name);
+			// If a var wasn't found above, make sure not to return a local var of the wrong function or depth.
+			if (!var)
+				aVarScope = FINDVAR_GLOBAL;
+		}
+
+		if (!var && !varbkp)
+		{
+			int insert_pos;
+			if (vars) // Use this first to support aDepth.
+				var = vars->Find(name, &insert_pos);
+			if (!var) // Use FindVar to support built-ins and globals.
+				var = g_script.FindVar(name, name_length, aVarScope, &vars, &insert_pos);
+			if (!var && aSetValue) // Avoid creating empty variables.
+				var = g_script.AddVar(name, name_length, vars, insert_pos
+					, search_local ? VAR_LOCAL : VAR_GLOBAL);
+		}
+
+		if (!var && !varbkp)
+			return DEBUGGER_E_UNKNOWN_PROPERTY;
+
+		if (!name_end)
+		{
+			// Just a variable name.
+			if (var)
+				aResult.var = var, aResult.kind = PropVar;
+			else
+				aResult.bkp = varbkp, aResult.kind = PropVarBkp;
+			return DEBUGGER_E_OK;
+		}
+		if (varbkp && varbkp->mType == VAR_ALIAS)
+			var = varbkp->mAliasFor;
+		if (var)
+		{
+			auto error = GetPropertyValue(*var, aResult); // Supports built-in vars.
+			if (error)
+				return error;
+			if (aResult.value.symbol == SYM_OBJECT)
+				iobj = aResult.value.object; // Take ownership of this reference, which is overwitten below.
+			else
+				aResult.value.Free(); // Free mem_to_free if non-null.
+			// aResult.value must be reinitialized because Invoke expects it to have a default of "".
+			// For x.<base> and x.<enum>, it's expected to have a value that doesn't need Free() called.
+			aResult.value.InitResult(aResult.value.buf);
+		}
+		else
+		{
+			if (varbkp->mAttrib & VAR_ATTRIB_IS_OBJECT) 
+			{
+				iobj = varbkp->mObject;
+				iobj->AddRef();
+			}
 		}
 	}
-
+	
 	if (!iobj)
 		return DEBUGGER_E_UNKNOWN_PROPERTY;
 
@@ -1571,9 +1708,7 @@ int Debugger::ParsePropertyName(LPCSTR aFullName, int aDepth, int aVarScope, Exp
 				*name_end = '\0';
 			}
 			else
-				c = 0;
-			//else there won't be a next iteration.
-			key_type = IsNumeric(name); // SYM_INTEGER or SYM_STRING.
+				c = 0; // Indicate there won't be a next iteration.
 		}
 		else
 		{
@@ -2107,7 +2242,7 @@ int Debugger::SendStandardResponse(char *aCommandName, char *aTransactionId)
 	return SendResponse();
 }
 
-int Debugger::SendContinuationResponse(char *aCommand, char *aStatus, char *aReason)
+int Debugger::SendContinuationResponse(LPCSTR aCommand, LPCSTR aStatus, LPCSTR aReason)
 {
 	if (!aCommand)
 	{
@@ -2260,10 +2395,9 @@ int Debugger::Connect(const char *aAddress, const char *aPort)
 				mResponseBuf.Clear();
 
 				// Write init message.
-				mResponseBuf.WriteF("<init appid=\"" AHK_NAME "\" ide_key=\"%e\" session=\"%e\" thread=\"%u\" parent=\"\" language=\"" DEBUGGER_LANG_NAME "\" protocol_version=\"1.0\" fileuri=\""
-					, ide_key.GetString(), session.GetString(), GetCurrentThreadId());
-				mResponseBuf.WriteFileURI(U4T(g_script.mFileSpec));
-				mResponseBuf.Write("\"/>");
+				mResponseBuf.WriteF("<init appid=\"" AHK_NAME "\" ide_key=\"%e\" session=\"%e\" thread=\"%u\" parent=\"\" language=\"" DEBUGGER_LANG_NAME
+					"\" protocol_version=\"1.0\" fileuri=\"%r\"/>"
+					, ide_key.GetString(), session.GetString(), GetCurrentThreadId(), g_script.mFileSpec);
 
 				if (SendResponse() == DEBUGGER_E_OK)
 				{
@@ -2517,6 +2651,14 @@ int Debugger::Buffer::WriteF(const char *aFormat, ...)
 					continue;
 				}
 
+				case 'r':
+					if (i == 0)
+						len += EstimateFileURILength(va_arg(vl, LPCTSTR));
+					else
+						WriteFileURI(va_arg(vl, LPCTSTR));
+					++format_ptr; // Skip %, outer loop will skip format char.
+					continue;
+
 				default:
 					s = NULL; // Skip section below.
 				} // switch (format_ptr[1])
@@ -2552,28 +2694,33 @@ int Debugger::Buffer::WriteF(const char *aFormat, ...)
 	return DEBUGGER_E_OK;
 }
 
-// Convert a file path to a URI and write it to the buffer.
-int Debugger::Buffer::WriteFileURI(const char *aPath)
+int Debugger::Buffer::EstimateFileURILength(LPCTSTR aPath)
 {
-	int c, len = 9; // 8 for "file:///", 1 for '\0' (written by sprintf()).
-
-	// Calculate required buffer size for path after encoding.
-	for (const char *ptr = aPath; c = *ptr; ++ptr)
+	TBYTE c, len = 8; // "file:///"
+	for (LPCTSTR ptr = aPath; c = *ptr; ++ptr)
 	{
-		if (cisalnum(c) || strchr("-_.!~*'()/\\", c))
+		if (cisalnum(c) || _tcschr(_T("-_.!~*'()/\\"), c))
 			++len;
 		else
-			len += 3;
+			// For code size, estimate based on worst-case scenario (U+FFFF -> %ef%bf%bf).
+			// Any extra space is likely to be used at some point, as the response buffer gets reused.
+			len += 9;
 	}
+	return len;
+}
 
-	// Ensure the buffer contains enough space.
-	if (ExpandIfNecessary(mDataUsed + len) != DEBUGGER_E_OK)
-		return DEBUGGER_E_INTERNAL_ERROR;
+// Convert a file path to a URI and write it to the buffer.
+// Caller has already verified there is enough space in the buffer.
+void Debugger::Buffer::WriteFileURI(LPCTSTR aPath)
+{
+	memcpy(mData + mDataUsed, "file:///", 8);
+	mDataUsed += 8;
 
-	Write("file:///", 8);
+	CStringUTF8FromTChar path8(aPath);
 
 	// Write to the buffer, encoding as we go.
-	for (const char *ptr = aPath; c = *ptr; ++ptr)
+	int c;
+	for (LPCSTR ptr = path8; c = *ptr; ++ptr)
 	{
 		if (cisalnum(c) || strchr("-_.!~*()/", c))
 		{
@@ -2586,13 +2733,11 @@ int Debugger::Buffer::WriteFileURI(const char *aPath)
 		}
 		else
 		{
-			len = sprintf(mData + mDataUsed, "%%%02X", c & 0xff);
+			int len = sprintf(mData + mDataUsed, "%%%02X", c & 0xff);
 			if (len != -1)
 				mDataUsed += len;
 		}
 	}
-
-	return DEBUGGER_E_OK;
 }
 
 int Debugger::Buffer::WriteEncodeBase64(const char *aInput, size_t aInputSize, bool aSkipBufferSizeCheck/* = false*/)
@@ -2733,7 +2878,7 @@ void DbgStack::Pop()
 		g_script.mCurrLine = g_Debugger.mCurrLine = mTop->line;
 }
 
-void DbgStack::Push(TCHAR *aDesc)
+void DbgStack::Push(LPCTSTR aDesc)
 {
 	Entry &s = *Push();
 	s.line = NULL;
@@ -2944,15 +3089,20 @@ void GetScriptStack(LPTSTR aBuf, int aBufSize, DbgStack::Entry *aTop)
 	auto aBuf_orig = aBuf;
 	for (auto se = aTop ? aTop : g_Debugger.mStack.mTop - 1; se >= g_Debugger.mStack.mBottom; --se)
 	{
-		auto &line = *se->line;
+		auto &line = se->line ? *se->line : *g_script.mCurrLine;
 		auto line_start = aBuf;
-		if (se->type == DbgStack::SE_Thread)
-			aBuf += sntprintf(aBuf, BUF_SPACE_REMAINING, _T("> %s\r\n"), se->desc);
-		else
+		if (se->type != DbgStack::SE_Thread || se->desc == g_AutoExecuteThreadDesc)
 		{
+			auto name = se->Name();
+			if (name == g_AutoExecuteThreadDesc)
+				name = _T("");
 			aBuf += sntprintf(aBuf, BUF_SPACE_REMAINING, _T("%s (%i) : [%s] ")
-				, Line::sSourceFile[line.mFileIndex], (int)line.mLineNumber, se->Name());
+				, Line::sSourceFile[line.mFileIndex], (int)line.mLineNumber, name);
 			aBuf = line.ToText(aBuf, BUF_SPACE_REMAINING, true, 0, false, false);
+		}
+		if (se->type == DbgStack::SE_Thread)
+		{
+			aBuf += sntprintf(aBuf, BUF_SPACE_REMAINING, _T("> %s\r\n"), se->desc);
 		}
 		if (BUF_SPACE_REMAINING <= 1) // In case of truncation, there should be 1 char left, since the terminator is not counted.
 		{

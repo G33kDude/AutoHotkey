@@ -329,7 +329,8 @@ struct DECLSPEC_NOVTABLE IDebugProperties
 // Helper function for event handlers and __Delete:
 ResultType CallMethod(IObject *aInvokee, IObject *aThis, LPTSTR aMethodName
 	, ExprTokenType *aParamValue = NULL, int aParamCount = 0, __int64 *aRetVal = NULL // For event handlers.
-	, int aExtraFlags = 0); // For Object.__Delete().
+	, int aExtraFlags = 0 // For Object.__Delete().
+	, bool aReturnBoolean = false);
 
 
 struct DerefType; // Forward declarations for use below.
@@ -483,8 +484,6 @@ struct ResultToken : public ExprTokenType
 			free(mem_to_free);
 	}
 
-	void StealMem(Var *aVar);
-	
 	void AcceptMem(LPTSTR aNewMem, size_t aLength)
 	{
 		symbol = SYM_STRING;
@@ -577,6 +576,7 @@ struct ResultToken : public ExprTokenType
 	ResultType Error(LPCTSTR aErrorText, LPCTSTR aExtraInfo);
 	ResultType Error(LPCTSTR aErrorText, Object *aPrototype);
 	ResultType Error(LPCTSTR aErrorText, LPCTSTR aExtraInfo, Object *aPrototype);
+	ResultType Error(LPCTSTR aErrorText, ExprTokenType &aExtraInfo, Object *aPrototype);
 	ResultType MemoryError();
 	ResultType UnknownMemberError(ExprTokenType &aObject, int aFlags, LPCTSTR aMember);
 	ResultType Win32Error(DWORD aError = GetLastError());
@@ -1003,7 +1003,8 @@ inline void global_set_defaults(ScriptThreadSettings &g)
 	g.TitleFindFast = true; // Since it's so much faster in many cases.
 	g.DetectHiddenWindows = false;  // Same as AutoIt2 but unlike AutoIt3; seems like a more intuitive default.
 	g.DetectHiddenText = true;  // Unlike AutoIt, which defaults to false.  This setting performs better.
-	#define DEFAULT_PEEK_FREQUENCY 5
+	#define DEFAULT_PEEK_FREQUENCY 5 // Default peek frequency for an interruptible/non-critical thread.
+	#define UNINTERRUPTIBLE_PEEK_FREQUENCY 16 // Used during a thread's uninterruptible period to ensure it has a chance to call Critical() before MsgSleep() is called.
 	g.PeekFrequency = DEFAULT_PEEK_FREQUENCY; // v1.0.46. See comments in Critical().
 	g.AllowTimers = true;
 	g.ThreadIsCritical = false;
